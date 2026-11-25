@@ -56,6 +56,8 @@ propre processus, avec un bac à sable neuf (voir `tests/lib.zsh`) :
 - un `PATH` réduit à une liste d'outils système autorisés et aux outils
   simulés de `tests/stubs/` (`df`, `diskutil`, `tmutil`, `lsof`, `pgrep`…).
   Les outils absents (brew, docker, ollama…) le sont aussi pour le script ;
+- le seul dossier système que le script nettoie (`/Library/Logs/DiagnosticReports`)
+  est remplacé par un dossier du bac à sable, via `MISTER_CLEAN_SYSTEM_LOGS` ;
 - `sudo`, `mdutil`, `mdfind` et `log` sont simulés : ils échouent sans rien
   faire et chaque appel est noté. Les tests passent `--skip-spotlight` et
   vérifient qu'aucun n'a été appelé. Ni sudo ni l'Accès complet au disque ne
