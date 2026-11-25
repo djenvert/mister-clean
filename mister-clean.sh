@@ -271,6 +271,8 @@ EOF
     plan.spotlight.suspect  "SUSPECT"
     plan.spotlight.healthy  "sain"
     plan.dry_run            "Mode --dry-run : rien n'a été supprimé. Relancez sans --dry-run pour exécuter le plan."
+    plan.bad_line           "plan, ligne %s ignorée (mal formée) : %s"
+    plan.unreadable         "plan illisible : %s"
 
     # --- 7. Exécution
     exec.title              "7. Exécution"
@@ -543,6 +545,8 @@ EOF
     plan.spotlight.suspect  "SUSPECT"
     plan.spotlight.healthy  "healthy"
     plan.dry_run            "--dry-run mode: nothing was deleted. Rerun without --dry-run to execute the plan."
+    plan.bad_line           "plan, line %s ignored (malformed): %s"
+    plan.unreadable         "unreadable plan: %s"
 
     # --- 7. Execution
     exec.title              "7. Execution"
@@ -1441,32 +1445,108 @@ audit_big() {
 # ----------------------------------------------------------------------------
 # 6. Plan de nettoyage
 # ----------------------------------------------------------------------------
-print_group() {  # print_group VERDICT TITRE
+# L'audit produit un plan sous forme de fichier texte ; l'affichage et
+# l'exécution ne lisent que ce fichier (load_plan). Format, version 1 :
+#
+#   - une ligne par candidat, dans l'ordre d'affichage et d'exécution, faite
+#     de mots protégés comme en shell (guillemets, apostrophes, \) :
+#       VERDICT CATÉGORIE KIB ÂGE LIBELLÉ RAISON CHEMIN ACTION…
+#     VERDICT : safe | caution | manual ; CATÉGORIE : clé cat.<…> du catalogue
+#     de messages ; KIB : taille en KiB ; ÂGE : jours, ou - ; ACTION… : les
+#     mots de l'action (voir Actions de nettoyage), « none » si aucune ;
+#   - « meta active_projects N » et « meta spotlight healthy|suspect » : état
+#     affiché sous le plan ;
+#   - lignes vides et lignes commençant par # ignorées.
+#
+# Exemple :
+#   meta active_projects 0
+#   meta spotlight healthy
+#   safe cache_app 12288 200 com.example 'non modifié depuis ≥ 30 j' /Users/moi/Library/Caches/com.example rm-contents /Users/moi/Library/Caches/com.example
+#   manual xcode 512000 40 Archives 'à trier à la main' /Users/moi/Library/Developer/Xcode/Archives none
+#
+# Le plan de chaque exécution est conservé à côté de son journal
+# (~/Library/Logs/mister-clean/run-….plan).
+
+# write_plan FICHIER : écrit le plan issu du registre des candidats, trié par
+# taille décroissante.
+write_plan() {
+  local f="$1" i
+  local -a order fields
+  order=(${(f)"$(for (( i = 1; i <= ${#CAND_PATH}; i++ )); do print -- "${CAND_KB[$i]} $i"; done | sort -rn | awk '{print $2}')"})
+  {
+    print -r -- "# mister-clean $VERSION — plan de nettoyage (format 1, décrit dans le script, section 6)"
+    print -r -- "meta active_projects ${#ACTIVE_PROJECTS}"
+    print -r -- "meta spotlight $( (( SPOT_SUSPECT )) && print suspect || print healthy )"
+    for i in "${order[@]}"; do
+      fields=("$CAND_VERDICT[i]" "$CAND_CAT[i]" "$CAND_KB[i]" "$CAND_AGE[i]" "$CAND_LABEL[i]" "$CAND_REASON[i]" "$CAND_PATH[i]")
+      print -r -- "${(j: :)${(@q)fields}} $CAND_ACTION[i]"   # CAND_ACTION : déjà des mots protégés
+    done
+  } > "$f"
+}
+
+# Plan chargé par load_plan (mêmes colonnes que le registre des candidats).
+typeset -ga PLAN_VERDICT PLAN_CAT PLAN_KB PLAN_AGE PLAN_LABEL PLAN_REASON PLAN_PATH PLAN_ACTION
+typeset -gA PLAN_META
+
+# load_plan FICHIER : charge le plan. Une ligne mal formée est signalée et
+# ignorée ; un fichier illisible fait échouer (code 1).
+load_plan() {
+  setopt local_options extended_glob
+  local f="$1" line n=0
+  local -a w
+  PLAN_VERDICT=() PLAN_CAT=() PLAN_KB=() PLAN_AGE=() PLAN_LABEL=() PLAN_REASON=() PLAN_PATH=() PLAN_ACTION=()
+  PLAN_META=()
+  [[ -r "$f" ]] || { print -u2 -r -- "$(m plan.unreadable "$f")"; return 1; }
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    (( n++ ))
+    [[ "$line" == [[:space:]]#(\#*|) ]] && continue
+    w=("${(@Q)${(z)line}}")
+    case "${w[1]}" in
+      meta)
+        PLAN_META[${w[2]-}]="${w[3]-}" ;;
+      safe|caution|manual)
+        if (( ${#w} >= 8 )) && [[ "${w[3]}" == <-> ]]; then
+          PLAN_VERDICT+=("$w[1]"); PLAN_CAT+=("$w[2]"); PLAN_KB+=("$w[3]"); PLAN_AGE+=("$w[4]")
+          PLAN_LABEL+=("$w[5]"); PLAN_REASON+=("$w[6]"); PLAN_PATH+=("$w[7]")
+          PLAN_ACTION+=("$(new_action "${(@)w[8,-1]}")")
+        else
+          warn "$(m plan.bad_line "$n" "$line")"
+        fi ;;
+      *)
+        warn "$(m plan.bad_line "$n" "$line")" ;;
+    esac
+  done < "$f"
+}
+
+# plan_totals : nombre d'éléments et taille par verdict du plan chargé.
+plan_totals() {
+  local i
+  SAFE_KB=0 CAUT_KB=0 MAN_KB=0 SAFE_N=0 CAUT_N=0 MAN_N=0
+  for (( i = 1; i <= ${#PLAN_VERDICT}; i++ )); do
+    case "${PLAN_VERDICT[$i]}" in
+      safe)    (( SAFE_KB += PLAN_KB[$i] )); (( SAFE_N++ )) ;;
+      caution) (( CAUT_KB += PLAN_KB[$i] )); (( CAUT_N++ )) ;;
+      manual)  (( MAN_KB  += PLAN_KB[$i] )); (( MAN_N++ )) ;;
+    esac
+  done
+}
+
+print_group() {  # print_group VERDICT TITRE  (plan chargé)
   local want="$1" title="$2" i shown=0
-  for i in "${ORDER[@]}"; do
-    [[ "${CAND_VERDICT[$i]}" == "$want" ]] || continue
+  for (( i = 1; i <= ${#PLAN_VERDICT}; i++ )); do
+    [[ "${PLAN_VERDICT[$i]}" == "$want" ]] || continue
     if (( ! shown )); then h2 "$title"; shown=1; fi
-    printf "  %-9s  %-16s  %-48s  %s\n" "$(human ${CAND_KB[$i]})" "$(m cat.${CAND_CAT[$i]})" "${CAND_LABEL[$i]:0:48}" "${C_DIM}${CAND_REASON[$i]}${C_RESET}"
-    [[ "${CAND_ACTION[$i]}" != "none" ]] && printf "  %-9s  %-16s  ${C_DIM}→ %s${C_RESET}\n" "" "" "$(describe_action "${CAND_ACTION[$i]}")"
+    printf "  %-9s  %-16s  %-48s  %s\n" "$(human ${PLAN_KB[$i]})" "$(m cat.${PLAN_CAT[$i]})" "${PLAN_LABEL[$i]:0:48}" "${C_DIM}${PLAN_REASON[$i]}${C_RESET}"
+    [[ "${PLAN_ACTION[$i]}" != "none" ]] && printf "  %-9s  %-16s  ${C_DIM}→ %s${C_RESET}\n" "" "" "$(describe_action "${PLAN_ACTION[$i]}")"
   done
   (( shown )) || { h2 "$title"; info "$(m plan.group.empty)"; }
 }
 
+# show_plan FICHIER : affiche le plan. Ne dépend que du fichier.
 show_plan() {
+  load_plan "$1" || return 1
+  plan_totals
   h1 "$(m plan.title)"
-
-  typeset -ga ORDER; ORDER=()
-  # tri par taille décroissante
-  for (( i = 1; i <= ${#CAND_PATH}; i++ )); do print -- "${CAND_KB[$i]} $i"; done | sort -rn | awk '{print $2}' | while read -r i; do ORDER+=("$i"); done
-
-  SAFE_KB=0 CAUT_KB=0 MAN_KB=0 SAFE_N=0 CAUT_N=0 MAN_N=0
-  for (( i = 1; i <= ${#CAND_PATH}; i++ )); do
-    case "${CAND_VERDICT[$i]}" in
-      safe)    (( SAFE_KB += CAND_KB[$i] )); (( SAFE_N++ )) ;;
-      caution) (( CAUT_KB += CAND_KB[$i] )); (( CAUT_N++ )) ;;
-      manual)  (( MAN_KB  += CAND_KB[$i] )); (( MAN_N++ )) ;;
-    esac
-  done
 
   print_group safe    "${C_GREEN}$(m plan.group.safe    "$(m verdict.safe)"    "$SAFE_N" "$(human $SAFE_KB)")${C_RESET}"
   print_group caution "${C_YELLOW}$(m plan.group.caution "$(m verdict.caution)" "$CAUT_N" "$(human $CAUT_KB)")${C_RESET}"
@@ -1474,7 +1554,7 @@ show_plan() {
 
   print
   say "$(m plan.summary "$(human $SAFE_KB)" "$(human $CAUT_KB)" "$(human $MAN_KB)")"
-  say "$(m plan.status "${#ACTIVE_PROJECTS}" "$( ((SPOT_SUSPECT)) && print -- "${C_RED}$(m plan.spotlight.suspect)${C_RESET}" || print -- "${C_GREEN}$(m plan.spotlight.healthy)${C_RESET}" )")"
+  say "$(m plan.status "${PLAN_META[active_projects]:-0}" "$( [[ "${PLAN_META[spotlight]-}" == suspect ]] && print -- "${C_RED}$(m plan.spotlight.suspect)${C_RESET}" || print -- "${C_GREEN}$(m plan.spotlight.healthy)${C_RESET}" )")"
 }
 
 # ----------------------------------------------------------------------------
@@ -1487,7 +1567,16 @@ ask() {  # ask "question" -> 0 si la réponse figure dans answer.confirm_yes
   answer_in answer.confirm_yes "$r"
 }
 
+# Les actions PRUDENCE ne sont proposées, une par une, que sur un terminal.
+is_interactive() { [[ -t 0 ]]; }
+
+# execute_plan FICHIER : exécute le plan. Ne dépend que du fichier et des
+# réponses de l'utilisateur. --yes ne vaut que pour les actions SÛRES : une
+# action PRUDENCE n'est jamais exécutée sans un « oui » pour elle seule.
 execute_plan() {
+  local i r
+  load_plan "$1" || return 1
+  plan_totals
   h1 "$(m exec.title)"
 
   FREED_BEFORE=$(df -k "$DATA_VOL" | tail -1 | awk '{print $4}')
@@ -1495,10 +1584,10 @@ execute_plan() {
 
   if (( SAFE_N > 0 )); then
     if (( ASSUME_YES )) || ask "$(m exec.confirm_safe "$SAFE_N" "$(human $SAFE_KB)")"; then
-      for i in "${ORDER[@]}"; do
-        [[ "${CAND_VERDICT[$i]}" == safe && "${CAND_ACTION[$i]}" != "none" ]] || continue
-        print -n -- "  ${CAND_LABEL[$i]:0:60} … "
-        run_action "${CAND_ACTION[$i]}" >> "$LOG_FILE" 2>&1
+      for (( i = 1; i <= ${#PLAN_VERDICT}; i++ )); do
+        [[ "${PLAN_VERDICT[$i]}" == safe && "${PLAN_ACTION[$i]}" != "none" ]] || continue
+        print -n -- "  ${PLAN_LABEL[$i]:0:60} … "
+        run_action "${PLAN_ACTION[$i]}" >> "$LOG_FILE" 2>&1
         case $? in
           0) print -- "${C_GREEN}$(m exec.ok)${C_RESET}"; (( DONE_N++ )) ;;
           2) print -r -- "${C_RED}${REFUSAL}${C_RESET}" ;;
@@ -1510,17 +1599,17 @@ execute_plan() {
     fi
   fi
 
-  if (( CAUT_N > 0 )) && [[ -t 0 ]]; then
+  if (( CAUT_N > 0 )) && is_interactive; then
     print
     say "$(m exec.caution_intro)"
-    for i in "${ORDER[@]}"; do
-      [[ "${CAND_VERDICT[$i]}" == caution && "${CAND_ACTION[$i]}" != "none" ]] || continue
-      print -n -- "  [$(human ${CAND_KB[$i]})] $(m cat.${CAND_CAT[$i]}) · ${CAND_LABEL[$i]:0:50} — ${C_DIM}${CAND_REASON[$i]}${C_RESET}  $(m exec.caution_choices) "
+    for (( i = 1; i <= ${#PLAN_VERDICT}; i++ )); do
+      [[ "${PLAN_VERDICT[$i]}" == caution && "${PLAN_ACTION[$i]}" != "none" ]] || continue
+      print -n -- "  [$(human ${PLAN_KB[$i]})] $(m cat.${PLAN_CAT[$i]}) · ${PLAN_LABEL[$i]:0:50} — ${C_DIM}${PLAN_REASON[$i]}${C_RESET}  $(m exec.caution_choices) "
       read -r r
       if answer_in answer.item_quit "$r"; then
         break
       elif answer_in answer.item_yes "$r"; then
-        run_action "${CAND_ACTION[$i]}" >> "$LOG_FILE" 2>&1
+        run_action "${PLAN_ACTION[$i]}" >> "$LOG_FILE" 2>&1
         case $? in
           0) ok "$(m exec.done)"; (( DONE_N++ )) ;;
           2) bad "$REFUSAL" ;;
@@ -1558,13 +1647,16 @@ main() {
   audit_caches
   audit_models
   audit_big
-  show_plan
+  # L'audit s'arrête au plan ; affichage et exécution ne lisent que lui.
+  PLAN_FILE="${LOG_FILE%.log}.plan"
+  write_plan "$PLAN_FILE"
+  show_plan "$PLAN_FILE" || exit 1
   if (( DRY_RUN )); then
     print
     dim "$(m plan.dry_run)"
     return 0
   fi
-  execute_plan
+  execute_plan "$PLAN_FILE"
 }
 
 # Exécuté (./mister-clean.sh, zsh mister-clean.sh) : lance l'audit.

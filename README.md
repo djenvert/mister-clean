@@ -15,7 +15,11 @@ Lancez-le depuis Terminal.app avec l'« Accès complet au disque » accordé
 tests Spotlight sont marqués NON CONCLUANTS. `sudo -v` juste avant permet
 de mesurer la taille de l'index système.
 
-Chaque exécution est journalisée dans `~/Library/Logs/mister-clean/`.
+Chaque exécution est journalisée dans `~/Library/Logs/mister-clean/`, avec
+son plan de nettoyage (`run-….plan`) : un candidat par ligne (verdict,
+catégorie, taille, âge, libellé, raison, chemin, action). Le format est décrit
+dans le script, section « 6. Plan de nettoyage ». L'affichage et l'exécution
+ne lisent que ce plan.
 
 ## Langue / Language
 

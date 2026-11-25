@@ -126,7 +126,7 @@ test_execution_affiche_le_refus() {
   in_sandbox '
     LOG_FILE="$MC_SANDBOX/journal"; DATA_VOL=/; ASSUME_YES=1
     add_candidate cache_app dehors "$MC_SANDBOX/dehors" 1 1 safe r "$(new_action rm-contents "$MC_SANDBOX/dehors")"
-    show_plan >/dev/null; execute_plan'
+    write_plan "$MC_SANDBOX/plan"; execute_plan "$MC_SANDBOX/plan"'
   assert_contains "$OUT" "chemin refusé : $d (hors de ~ et des emplacements autorisés)"
   assert_contains "$OUT" "0 action(s) exécutée(s)"
   assert_exists "$d/f"
