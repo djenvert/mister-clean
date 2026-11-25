@@ -20,7 +20,7 @@ TESTS_DIR="${${(%):-%x}:A:h}"
 SCRIPT="${TESTS_DIR:h}/mister-clean.sh"
 
 # Outils système réels que le script peut utiliser dans le bac à sable.
-MC_REAL_TOOLS=(awk cat cut date dd du find grep head ls mkdir mktemp perl rm sed sleep sort
+MC_REAL_TOOLS=(awk cat cut date dd du find git grep head ls mkdir mktemp perl rm sed sleep sort
                stat tail tee touch tr uname wc xargs)
 
 # sandbox_new : crée le bac à sable et exporte MC_SANDBOX, H (le HOME jetable).
@@ -120,7 +120,7 @@ CATALOGUE_CHECK='
       (( ${#f} == 10 )) || { print "colonnes: $line"; continue; }
       [[ $f[1] == (logs|dev|pkg|models|big|appdata) ]] || print "section: $line"
       [[ -n "${SIZE_MIN[$f[5]]-}" ]] || print "seuil: $line"
-      [[ $f[6] == (safe|caution|manual|age|age!*=*|model) ]] || print "verdict: $line"
+      [[ $f[6] == (safe|caution|manual|age|age!*=*|model|git) ]] || print "verdict: $line"
       for lang in fr en; do
         messages_$lang
         [[ -n "${MSG[cat.$f[2]]-}" ]] || print "cat.$f[2] ($lang)"
