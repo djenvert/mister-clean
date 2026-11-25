@@ -113,6 +113,8 @@ EOF
     cat.tm_snapshot         "Snapshot TM"
     cat.trash               "Corbeille"
     cat.t3code              "T3 Code"
+    cat.orca                "Orca"
+    cat.model_orca          "Modèle vocal Orca"
     cat.hf_datasets         "Données Hugging Face"
     cat.huggingface         "Cache Hugging Face"
     cat.ios_backups         "Sauvegardes iOS"
@@ -228,6 +230,10 @@ EOF
     t3code.tools.label      "outils téléchargés par T3 Code (navigateur, agents)"
     t3code.tools.reason     "réinstallés par T3 Code à la demande ; à gérer depuis l'app"
     hf.xet.label            "cache Xet Hugging Face (morceaux de fichiers)"
+    orca.open.reason        "Orca est ouvert : fermez-le avant"
+    orca.terminal.label     "historique des terminaux Orca (%s)"
+    orca.browser.label      "navigateur intégré d'Orca (%s)"
+    orca.browser.reason     "sessions et caches du navigateur intégré : à gérer depuis Orca"
     homebrew.label          "cache des téléchargements + vieilles versions"
     homebrew.reason         "brew cleanup --prune=all -s retire bouteilles et téléchargements obsolètes"
     npm.label               "cache npm (_cacache)"
@@ -403,6 +409,8 @@ EOF
     cat.tm_snapshot         "TM snapshot"
     cat.trash               "Trash"
     cat.t3code              "T3 Code"
+    cat.orca                "Orca"
+    cat.model_orca          "Orca speech model"
     cat.hf_datasets         "Hugging Face dataset"
     cat.huggingface         "Hugging Face cache"
     cat.ios_backups         "iOS backups"
@@ -518,6 +526,10 @@ EOF
     t3code.tools.label      "tools downloaded by T3 Code (browser, agents)"
     t3code.tools.reason     "reinstalled by T3 Code on demand; manage them from the app"
     hf.xet.label            "Hugging Face Xet cache (file chunks)"
+    orca.open.reason        "Orca is open: quit it first"
+    orca.terminal.label     "Orca terminal history (%s)"
+    orca.browser.label      "Orca built-in browser (%s)"
+    orca.browser.reason     "built-in browser sessions and caches: manage them from Orca"
     homebrew.label          "download cache + old versions"
     homebrew.reason         "brew cleanup --prune=all -s removes stale bottles and downloads"
     npm.label               "npm cache (_cacache)"
@@ -1301,6 +1313,18 @@ agents  | t3code           | ~/.t3/userdata/logs                    | -     | ca
 agents  | t3code           | ~/.t3/caches                           | -     | cache   | age!T3 Code,T3 Code (Beta)=t3code.open.reason | - | rm-contents {path}        | @t3code.caches.label         | du
 agents  | t3code           | ~/.t3/worktrees/*/*                    | git   | cache   | git      | -                          | cmd git -C {path} worktree remove {path} | {tpath}                | du
 agents  | t3code           | ~/.t3/tools                            | -     | appdata | manual   | t3code.tools.reason        | none                               | @t3code.tools.label          | du
+# Orca (app de coding agents, github.com/stablyai/orca). Emplacements tirés du
+# code source au commit 386d36cb (2026-11-25), PAS vérifiés sur une vraie
+# installation. Worktrees : dossier par défaut seulement (~/orca/workspaces,
+# rangés par dépôt) ; les dossiers choisis dans les réglages (workspaceDir,
+# worktreeBasePath) ne sont pas suivis. Jamais listés : les bases (*.db,
+# *.sqlite), profiles/ et ~/.orca (identifiants).
+agents  | orca             | ~/orca/workspaces/*/*                  | git   | cache   | git      | -                          | cmd git -C {path} worktree remove {path} | {tpath}                | du
+agents  | orca             | ~/Library/Application Support/Orca/logs | -    | cache   | safe     | logs.reason                | rm-old-files {path} {days}         | @logs.label {tpath} {days}   | old_files_kb
+agents  | orca             | ~/Library/Application Support/Orca/terminal-* | - | cache | age!Orca=orca.open.reason | -     | rm-contents {path}                 | @orca.terminal.label {name}  | du
+agents  | model_orca       | ~/Library/Application Support/Orca/speech-models/* | - | bulky | model | model.old.reason       | rm-path {path}                     | {name}                       | du
+agents  | orca             | ~/Library/Application Support/Orca/Partitions | - | appdata | manual | orca.browser.reason      | none                               | @orca.browser.label {name}   | du
+agents  | orca             | ~/Library/Application Support/Orca/*Cache | -   | appdata | manual   | orca.browser.reason        | none                               | @orca.browser.label {name}   | du
 appdata | apple_container  | ~/Library/Application Support/com.apple.container | - | appdata | manual | apple_container.reason | none                     | @apple_container.label       | du
 appdata | model_macwhisper | ~/Library/Application Support/MacWhisper | -    | appdata | manual | macwhisper.reason        | none                               | @macwhisper.label            | du
 '
