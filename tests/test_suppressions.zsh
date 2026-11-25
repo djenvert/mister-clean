@@ -137,7 +137,7 @@ test_execution_reelle_de_bout_en_bout() {
   make_file "$c/blob.bin" 12288; age_path "$c" 200
   # Rapports de plantage « système » : le bac à sable remplace le vrai dossier.
   local sys="$MC_SANDBOX/system-logs"
-  mkdir -p "$sys"; dd if=/dev/urandom of="$sys/vieux.crash" bs=1024 count=6000 2>/dev/null
+  mkdir -p "$sys"; dd if=/dev/urandom of="$sys/vieux.crash" bs=1024 count=12000 2>/dev/null
   age_path "$sys" 200
   run_script --yes --skip-spotlight --lang fr
   assert_status 0
