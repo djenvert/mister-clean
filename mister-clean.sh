@@ -1144,20 +1144,29 @@ typeset -gA SIZE_MIN
 SIZE_MIN=(cache 10240 bulky 51200 appdata 102400)
 
 # Une ligne par source, colonnes séparées par « | » :
-#   section  : où la source est sondée (logs, dev, pkg, big, appdata)
+#   section  : où la source est sondée (logs, dev, pkg, models, big, appdata)
 #   cat      : catégorie (libellé : MSG[cat.<cat>])
 #   lieu     : ~/chemin (joker * permis), {syslogs} (SYSTEM_LOGS_DIR),
 #              ou « $ commande » : l'emplacement est donné par l'outil
 #   outil    : outil requis (sinon la source est ignorée), - si aucun
 #   seuil    : clé de SIZE_MIN
-#   verdict  : safe | caution | manual | age (selon --days ; « age!App=clé » :
-#              caution avec la raison MSG[clé] si l'application App tourne)
+#   verdict  : safe | caution | manual, ou une règle de verdict (ci-dessous)
 #   raison   : clé du catalogue de messages, - pour un verdict age
 #   action   : mots de l'action (voir Actions de nettoyage), ou none
 #   libellé  : @clé [args…] (message du catalogue) ou texte littéral
 #   taille   : du (taille du dossier) ou nom d'une fonction TAILLE CHEMIN
 # Jetons remplacés dans action et libellé : {path} chemin, {tpath} chemin
 # abrégé en ~, {name} dernier élément du chemin, {days} valeur de --days.
+#
+# Règles de verdict (colonne verdict), appliquées par source_verdict :
+#   age      safe si rien n'a bougé depuis --days jours, caution sinon ;
+#            « age!App=clé » : caution avec la raison MSG[clé] si l'application
+#            App tourne.
+#   model    règle unique des modèles IA (add_model, selon --model-days) ;
+#            la raison est la clé du message « ancien », qui reçoit l'âge et
+#            --model-days. Avec un joker (racine/*), chaque modèle est un
+#            candidat ; scan_cache_dir ignore ces racines (is_model_area).
+# Ajouter une règle : une branche dans source_verdict, documentée ici.
 #
 # Ajouter un outil = ajouter une ligne.
 SOURCES='
@@ -1181,6 +1190,11 @@ pkg     | gradle      | ~/.gradle/caches                        | -     | cache 
 big     | trash       | ~/.Trash                                | -     | cache   | caution  | trash.reason               | rm-contents {path}                 | ~/.Trash                     | du
 big     | ios_backups | ~/Library/Application Support/MobileSync/Backup | - | cache | manual   | ios_backups.reason         | none                               | MobileSync/Backup            | du
 big     | mail        | ~/Library/Containers/com.apple.mail/Data/Library/Mail Downloads | - | cache | safe | mail.reason   | rm-contents {path}                 | @mail.label                  | du
+models  | model_huggingface | ~/.cache/huggingface/hub/*          | -     | bulky   | model    | model.old.reason           | rm-path {path}                     | {name}                       | du
+models  | model_lmstudio   | ~/.lmstudio/models/*                   | -     | bulky   | model    | model.old.reason           | rm-path {path}                     | {name}                       | du
+models  | model_lmstudio   | ~/.cache/lm-studio/models/*            | -     | bulky   | model    | model.old.reason           | rm-path {path}                     | {name}                       | du
+models  | model_whisper    | ~/.cache/whisper/*                     | -     | bulky   | model    | model.old.reason           | rm-path {path}                     | {name}                       | du
+models  | model_torch      | ~/.cache/torch/hub/checkpoints/*       | -     | bulky   | model    | model.old.reason           | rm-path {path}                     | {name}                       | du
 appdata | apple_container  | ~/Library/Application Support/com.apple.container | - | appdata | manual | apple_container.reason | none                     | @apple_container.label       | du
 appdata | model_macwhisper | ~/Library/Application Support/MacWhisper | -    | appdata | manual | macwhisper.reason        | none                               | @macwhisper.label            | du
 '
@@ -1212,7 +1226,7 @@ _source_fill() {
 probe_sources() {
   setopt local_options extended_glob
   local want="$1" line sec cat loc tool min verdict reason action label size
-  local p kb v r app key w label_txt
+  local p kb w label_txt
   local -a f places words largs
   for line in ${(f)SOURCES}; do
     [[ "$line" == [[:space:]]#(\#*|) ]] && continue
@@ -1232,17 +1246,6 @@ probe_sources() {
       [[ -n "$p" && -d "$p" ]] || continue
       if [[ "$size" == du ]]; then kb=$(du_kb "$p"); else kb=$($size "$p"); fi
       (( kb >= SIZE_MIN[$min] )) || continue
-      # Verdict souhaité
-      case "$verdict" in
-        age*)
-          r=""
-          if [[ "$verdict" == age!* ]]; then
-            app="${${verdict#age!}%%=*}"; key="${verdict#*=}"
-            is_running "$app" && r="$(m $key)"
-          fi
-          IFS='|' read -r v r <<< "$(verdict_for "$p" "$CACHE_DAYS" "$r")" ;;
-        *) v="$verdict"; r="$(m $reason)" ;;
-      esac
       # Action et libellé
       words=()
       for w in ${(z)action}; do words+=("$(_source_fill "$w" "$p")"); done
@@ -1252,9 +1255,35 @@ probe_sources() {
       else
         label_txt="$(_source_fill "$label" "$p")"
       fi
-      add_candidate "$cat" "$label_txt" "$p" "$kb" "$(newest_age_days "$p")" "$v" "$r" "$(new_action "${words[@]}")"
+      source_verdict "$verdict" "$reason" "$cat" "$label_txt" "$p" "$kb" "$(new_action "${words[@]}")"
     done
   done
+}
+
+# source_verdict VERDICT RAISON CAT LIBELLÉ CHEMIN KB ACTION : applique la
+# colonne verdict d'une source (valeur fixe ou règle de verdict) et propose le
+# candidat au registre. Les titres de catégorie des modèles s'affichent ici,
+# une fois par catégorie.
+typeset -g _LAST_MODEL_CAT=""
+source_verdict() {
+  local verdict="$1" reason="$2" cat="$3" label="$4" p="$5" kb="$6" action="$7"
+  local v r app key age
+  age="$(newest_age_days "$p")"
+  case "$verdict" in
+    age*)
+      r=""
+      if [[ "$verdict" == age!* ]]; then
+        app="${${verdict#age!}%%=*}"; key="${verdict#*=}"
+        is_running "$app" && r="$(m $key)"
+      fi
+      IFS='|' read -r v r <<< "$(verdict_for "$p" "$CACHE_DAYS" "$r")"
+      add_candidate "$cat" "$label" "$p" "$kb" "$age" "$v" "$r" "$action" ;;
+    model)
+      [[ "$_LAST_MODEL_CAT" == "$cat" ]] || { h2 "$(m cat.$cat)"; _LAST_MODEL_CAT="$cat"; }
+      add_model "$cat" "$label" "$p" "$kb" "$age" 0 "$(m $reason "$age" "$MODEL_DAYS")" "$action" ;;
+    *)
+      add_candidate "$cat" "$label" "$p" "$kb" "$age" "$verdict" "$(m $reason)" "$action" ;;
+  esac
 }
 
 scan_cache_dir() {  # scan_cache_dir CATEGORIE RACINE  (chaque sous-dossier devient un candidat)
@@ -1329,36 +1358,29 @@ add_model() {
   add_candidate "$cat" "$label" "$p" "$kb" "$age" "$v" "$reason" "$action"
 }
 
-# Dossiers de modèles : chaque sous-dossier d'une racine est un modèle
-# (paires CATÉGORIE RACINE). Le scan des caches (~/.cache) les ignore : ils
-# relèvent de la règle des modèles, pas de celle des caches.
-typeset -ga MODEL_ROOTS
-MODEL_ROOTS=(
-  model_huggingface "$HOME/.cache/huggingface/hub"
-  model_lmstudio    "$HOME/.lmstudio/models"
-  model_lmstudio    "$HOME/.cache/lm-studio/models"
-  model_whisper     "$HOME/.cache/whisper"
-  model_torch       "$HOME/.cache/torch/hub/checkpoints"
-)
+# model_roots : racines de modèles déclarées au catalogue (lignes au verdict
+# model), chemins absolus, joker final retiré. Le scan des caches (~/.cache)
+# les ignore : elles relèvent de la règle des modèles, pas de celle des caches.
+model_roots() {
+  setopt local_options extended_glob
+  local line loc
+  local -a f
+  for line in ${(f)SOURCES}; do
+    [[ "$line" == [[:space:]]#(\#*|) ]] && continue
+    f=("${(@s:|:)line}"); f=("${(@)${(@)f##[[:space:]]##}%%[[:space:]]##}")
+    [[ "$f[6]" == model ]] || continue
+    loc="${f[3]/#\~/$HOME}"
+    print -r -- "${loc%/\*}"
+  done
+}
 
 # is_model_area CHEMIN : vrai si CHEMIN est une racine de modèles ou en contient une.
 is_model_area() {
   local root
-  for root in "${(@)MODEL_ROOTS:#model_*}"; do   # les racines, sans les catégories
+  for root in ${(f)"$(model_roots)"}; do
     [[ "$root" == "$1" || "$root" == "$1"/* ]] && return 0
   done
   return 1
-}
-
-scan_model_root() {  # scan_model_root CATEGORIE RACINE  (le libellé de catégorie sert de titre)
-  local cat="$1" root="$2" d kb age
-  [[ -d "$root" ]] || return 0
-  h2 "$(m cat.$cat)"
-  for d in "$root"/*(N/); do
-    kb=$(du_kb "$d"); (( kb >= SIZE_MIN[bulky] )) || continue
-    age=$(newest_age_days "$d")
-    add_model "$cat" "${d:t}" "$d" "$kb" "$age" 0 "$(m model.old.reason "$age" "$MODEL_DAYS")" "$(new_action rm-path "$d")"
-  done
 }
 
 audit_models() {
@@ -1381,10 +1403,7 @@ audit_models() {
     done
   fi
 
-  local i
-  for (( i = 1; i < ${#MODEL_ROOTS}; i += 2 )); do
-    scan_model_root "${MODEL_ROOTS[i]}" "${MODEL_ROOTS[i+1]}"
-  done
+  probe_sources models
 }
 
 # ----------------------------------------------------------------------------
