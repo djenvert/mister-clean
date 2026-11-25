@@ -112,6 +112,9 @@ EOF
     cat.model_macwhisper    "Modèle MacWhisper"
     cat.tm_snapshot         "Snapshot TM"
     cat.trash               "Corbeille"
+    cat.t3code              "T3 Code"
+    cat.hf_datasets         "Données Hugging Face"
+    cat.huggingface         "Cache Hugging Face"
     cat.ios_backups         "Sauvegardes iOS"
     cat.mail                "Mail"
     cat.inactive_project    "Projet inactif"
@@ -219,6 +222,12 @@ EOF
     sim.unavailable.reason  "xcrun simctl delete unavailable ne retire que les simulateurs orphelins"
 
     pkg.title               "Gestionnaires de paquets"
+    agents.title            "Agents de code"
+    t3code.open.reason      "T3 Code est ouvert : fermez-le avant"
+    t3code.caches.label     "caches de T3 Code"
+    t3code.tools.label      "outils téléchargés par T3 Code (navigateur, agents)"
+    t3code.tools.reason     "réinstallés par T3 Code à la demande ; à gérer depuis l'app"
+    hf.xet.label            "cache Xet Hugging Face (morceaux de fichiers)"
     homebrew.label          "cache des téléchargements + vieilles versions"
     homebrew.reason         "brew cleanup --prune=all -s retire bouteilles et téléchargements obsolètes"
     npm.label               "cache npm (_cacache)"
@@ -393,6 +402,9 @@ EOF
     cat.model_macwhisper    "MacWhisper model"
     cat.tm_snapshot         "TM snapshot"
     cat.trash               "Trash"
+    cat.t3code              "T3 Code"
+    cat.hf_datasets         "Hugging Face dataset"
+    cat.huggingface         "Hugging Face cache"
     cat.ios_backups         "iOS backups"
     cat.mail                "Mail"
     cat.inactive_project    "Inactive project"
@@ -500,6 +512,12 @@ EOF
     sim.unavailable.reason  "xcrun simctl delete unavailable only removes orphaned simulators"
 
     pkg.title               "Package managers"
+    agents.title            "Coding agents"
+    t3code.open.reason      "T3 Code is open: quit it first"
+    t3code.caches.label     "T3 Code caches"
+    t3code.tools.label      "tools downloaded by T3 Code (browser, agents)"
+    t3code.tools.reason     "reinstalled by T3 Code on demand; manage them from the app"
+    hf.xet.label            "Hugging Face Xet cache (file chunks)"
     homebrew.label          "download cache + old versions"
     homebrew.reason         "brew cleanup --prune=all -s removes stale bottles and downloads"
     npm.label               "npm cache (_cacache)"
@@ -755,7 +773,20 @@ run_with_timeout() {  # run_with_timeout SECONDES cmd...
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
-is_running() { pgrep -x "$1" >/dev/null 2>&1; }
+# is_running NOM : vrai si un processus s'appelle exactement NOM. pgrep lit une
+# expression régulière : les caractères spéciaux (« T3 Code (Beta) ») sont
+# protégés. -a : les processus ancêtres comptent aussi (le script peut tourner
+# dans le terminal intégré de l'application même).
+is_running() {
+  local c re=""
+  for c in "${(@s::)1}"; do
+    case "$c" in
+      [.\[\]\\\(\)*+?{}\|^\$]) re+="\\$c" ;;
+      *) re+="$c" ;;
+    esac
+  done
+  pgrep -a -x -- "$re" >/dev/null 2>&1
+}
 
 # ----------------------------------------------------------------------------
 # Registre des candidats au nettoyage
@@ -1205,7 +1236,8 @@ typeset -gA SIZE_MIN
 SIZE_MIN=(cache 10240 bulky 51200 appdata 102400)
 
 # Une ligne par source, colonnes séparées par « | » :
-#   section  : où la source est sondée (logs, dev, pkg, models, big, appdata)
+#   section  : où la source est sondée (logs, dev, pkg, agents, models, big,
+#              appdata ; voir run_section)
 #   cat      : catégorie (libellé : MSG[cat.<cat>])
 #   lieu     : ~/chemin (joker * permis), {syslogs} (SYSTEM_LOGS_DIR),
 #              ou « $ commande » : l'emplacement est donné par l'outil
@@ -1222,7 +1254,8 @@ SIZE_MIN=(cache 10240 bulky 51200 appdata 102400)
 # Règles de verdict (colonne verdict), appliquées par source_verdict :
 #   age      safe si rien n'a bougé depuis --days jours, caution sinon ;
 #            « age!App=clé » : caution avec la raison MSG[clé] si l'application
-#            App tourne.
+#            App tourne (nom exact du processus) ; plusieurs noms possibles,
+#            séparés par des virgules : « age!T3 Code,T3 Code (Beta)=clé ».
 #   model    règle unique des modèles IA (add_model, selon --model-days) ;
 #            la raison est la clé du message « ancien », qui reçoit l'âge et
 #            --model-days. Avec un joker (racine/*), chaque modèle est un
@@ -1258,10 +1291,16 @@ big     | trash       | ~/.Trash                                | -     | cache 
 big     | ios_backups | ~/Library/Application Support/MobileSync/Backup | - | cache | manual   | ios_backups.reason         | none                               | MobileSync/Backup            | du
 big     | mail        | ~/Library/Containers/com.apple.mail/Data/Library/Mail Downloads | - | cache | safe | mail.reason   | rm-contents {path}                 | @mail.label                  | du
 models  | model_huggingface | ~/.cache/huggingface/hub/*          | -     | bulky   | model    | model.old.reason           | rm-path {path}                     | {name}                       | du
+models  | hf_datasets      | ~/.cache/huggingface/datasets/*        | -     | bulky   | model    | model.old.reason           | rm-path {path}                     | {name}                       | du
+models  | huggingface      | ~/.cache/huggingface/xet               | -     | cache   | age      | -                          | rm-contents {path}                 | @hf.xet.label                | du
 models  | model_lmstudio   | ~/.lmstudio/models/*                   | -     | bulky   | model    | model.old.reason           | rm-path {path}                     | {name}                       | du
 models  | model_lmstudio   | ~/.cache/lm-studio/models/*            | -     | bulky   | model    | model.old.reason           | rm-path {path}                     | {name}                       | du
 models  | model_whisper    | ~/.cache/whisper/*                     | -     | bulky   | model    | model.old.reason           | rm-path {path}                     | {name}                       | du
 models  | model_torch      | ~/.cache/torch/hub/checkpoints/*       | -     | bulky   | model    | model.old.reason           | rm-path {path}                     | {name}                       | du
+agents  | t3code           | ~/.t3/userdata/logs                    | -     | cache   | safe     | logs.reason                | rm-old-files {path} {days}         | @logs.label {tpath} {days}   | old_files_kb
+agents  | t3code           | ~/.t3/caches                           | -     | cache   | age!T3 Code,T3 Code (Beta)=t3code.open.reason | - | rm-contents {path}        | @t3code.caches.label         | du
+agents  | t3code           | ~/.t3/worktrees/*/*                    | git   | cache   | git      | -                          | cmd git -C {path} worktree remove {path} | {tpath}                | du
+agents  | t3code           | ~/.t3/tools                            | -     | appdata | manual   | t3code.tools.reason        | none                               | @t3code.tools.label          | du
 appdata | apple_container  | ~/Library/Application Support/com.apple.container | - | appdata | manual | apple_container.reason | none                     | @apple_container.label       | du
 appdata | model_macwhisper | ~/Library/Application Support/MacWhisper | -    | appdata | manual | macwhisper.reason        | none                               | @macwhisper.label            | du
 '
@@ -1340,8 +1379,10 @@ source_verdict() {
     age*)
       r=""
       if [[ "$verdict" == age!* ]]; then
-        app="${${verdict#age!}%%=*}"; key="${verdict#*=}"
-        is_running "$app" && r="$(m $key)"
+        key="${verdict#*=}"
+        for app in "${(@s:,:)${${verdict#age!}%%=*}}"; do
+          is_running "$app" && { r="$(m $key)"; break; }
+        done
       fi
       IFS='|' read -r v r <<< "$(verdict_for "$p" "$CACHE_DAYS" "$r")"
       add_candidate "$cat" "$label" "$p" "$kb" "$age" "$v" "$r" "$action" ;;
@@ -1395,6 +1436,8 @@ audit_caches() {
   run_section dev
   h2 "$(m pkg.title)"
   run_section pkg
+  h2 "$(m agents.title)"
+  run_section agents
 }
 
 # ----------------------------------------------------------------------------
