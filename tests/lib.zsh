@@ -8,6 +8,10 @@
 #   $MC_SANDBOX/calls     journal des appels aux outils simulés (« nom args »)
 #   $MC_SANDBOX/running   noms d'applications que pgrep dit lancées (une par ligne)
 #   $MC_SANDBOX/open_files, cwds   sortie simulée de lsof (un chemin par ligne)
+#   $MC_SANDBOX/system-logs  remplace /Library/Logs/DiagnosticReports
+#                         (MISTER_CLEAN_SYSTEM_LOGS) : jamais de vrais journaux
+#
+# Le script testé tourne depuis le HOME jetable (répertoire courant).
 #
 # Les outils absents du PATH (brew, docker, ollama, xcrun…) sont donc absents
 # pour le script : aucun vrai gestionnaire de paquets n'est interrogé.
@@ -42,14 +46,15 @@ sandbox_new() {
 _sandbox_env() {
   MC_ENV=(env -i "HOME=$H" "USER=${USER:-test}" "PATH=$MC_SANDBOX/bin"
           "TMPDIR=$MC_SANDBOX/tmp/" "LANG=${MC_LANG:-fr_FR.UTF-8}"
-          "MC_SANDBOX=$MC_SANDBOX" "MC_STUB_CALLS=$MC_SANDBOX/calls")
+          "MC_SANDBOX=$MC_SANDBOX" "MC_STUB_CALLS=$MC_SANDBOX/calls"
+          "MISTER_CLEAN_SYSTEM_LOGS=$MC_SANDBOX/system-logs")
 }
 
 # run_script ARGS… : exécute le script dans le bac à sable.
 # Sortie (stdout+stderr) dans $OUT, code de retour dans $STATUS.
 run_script() {
   _sandbox_env
-  OUT="$($MC_ENV /bin/zsh "$SCRIPT" "$@" 2>&1 </dev/null)"
+  OUT="$(cd "$H" && $MC_ENV /bin/zsh "$SCRIPT" "$@" 2>&1 </dev/null)"
   STATUS=$?
 }
 
@@ -57,7 +62,7 @@ run_script() {
 # chargé (source) au préalable. Sortie dans $OUT, code dans $STATUS.
 in_sandbox() {
   _sandbox_env
-  OUT="$($MC_ENV /bin/zsh -f -c "source ${(q)SCRIPT}; $1" 2>&1 </dev/null)"
+  OUT="$(cd "$H" && $MC_ENV /bin/zsh -f -c "source ${(q)SCRIPT}; $1" 2>&1 </dev/null)"
   STATUS=$?
 }
 
