@@ -108,7 +108,7 @@ test_bout_en_bout_dependances_inactives_avec_fichier_ouvert() {
 }
 
 test_bout_en_bout_manuel_reste_manuel() {
-  make_file "$H/Library/Developer/Xcode/Archives/a.xcarchive/x" 100 10
+  make_file "$H/Library/Developer/Xcode/Archives/a.xcarchive/x" 11000 10
   print -r -- "$H/Library/Developer/Xcode/Archives/a.xcarchive/x" > "$MC_SANDBOX/open_files"
   run_script --dry-run --skip-spotlight --lang fr
   assert_contains "$(section 'C. MANUEL')" "Archives (.xcarchive + dSYM)"
@@ -118,7 +118,7 @@ test_bout_en_bout_manuel_reste_manuel() {
 test_bout_en_bout_le_journal_du_script_ne_protege_rien() {
   # lsof voit toujours le journal de l'exécution en cours, ouvert par tee :
   # il ne doit pas faire passer les vieux journaux en PRUDENCE.
-  make_file "$H/Library/Logs/vieille-app/app.log" 6000 200
+  make_file "$H/Library/Logs/vieille-app/app.log" 12000 200
   print -r -- "$H/Library/Logs/mister-clean/run-en-cours.log" > "$MC_SANDBOX/open_files"
   run_script --dry-run --skip-spotlight --lang fr
   assert_contains "$(section 'A. SÛR')" "~/Library/Logs"

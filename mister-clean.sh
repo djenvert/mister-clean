@@ -1126,13 +1126,140 @@ audit_spotlight() {
 # ----------------------------------------------------------------------------
 # 3. Caches
 # ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Catalogue des sources à emplacement connu
+# ----------------------------------------------------------------------------
+# Seuils de taille, en KiB. Un candidat entre dans le plan si sa taille est
+# AU MOINS égale au seuil de sa source.
+#   cache    10 Mio  : tout ce qui est régénérable (caches, journaux, corbeille,
+#                      sauvegardes…) ; en dessous, le gain ne vaut pas une ligne.
+#   bulky    50 Mio  : modèles IA et dépendances de projets, proposés un par un.
+#   appdata 100 Mio  : données d'applications (MANUEL, pour information) :
+#                      seules les très grosses méritent d'être signalées.
+typeset -gA SIZE_MIN
+SIZE_MIN=(cache 10240 bulky 51200 appdata 102400)
+
+# Une ligne par source, colonnes séparées par « | » :
+#   section  : où la source est sondée (logs, dev, pkg, big, appdata)
+#   cat      : catégorie (libellé : MSG[cat.<cat>])
+#   lieu     : ~/chemin (joker * permis), {syslogs} (SYSTEM_LOGS_DIR),
+#              ou « $ commande » : l'emplacement est donné par l'outil
+#   outil    : outil requis (sinon la source est ignorée), - si aucun
+#   seuil    : clé de SIZE_MIN
+#   verdict  : safe | caution | manual | age (selon --days ; « age!App=clé » :
+#              caution avec la raison MSG[clé] si l'application App tourne)
+#   raison   : clé du catalogue de messages, - pour un verdict age
+#   action   : mots de l'action (voir Actions de nettoyage), ou none
+#   libellé  : @clé [args…] (message du catalogue) ou texte littéral
+#   taille   : du (taille du dossier) ou nom d'une fonction TAILLE CHEMIN
+# Jetons remplacés dans action et libellé : {path} chemin, {tpath} chemin
+# abrégé en ~, {name} dernier élément du chemin, {days} valeur de --days.
+#
+# Ajouter un outil = ajouter une ligne.
+SOURCES='
+logs    | logs        | ~/Library/Logs                          | -     | cache   | safe     | logs.reason                | rm-old-files {path} {days}         | @logs.label {tpath} {days}   | old_files_kb
+logs    | logs        | {syslogs}                               | -     | cache   | safe     | logs.reason                | rm-old-files {path} {days}         | @logs.label {tpath} {days}   | old_files_kb
+logs    | logs        | ~/Library/Logs/DiagnosticReports        | -     | cache   | safe     | logs.reason                | rm-old-files {path} {days}         | @logs.label {tpath} {days}   | old_files_kb
+dev     | xcode       | ~/Library/Developer/Xcode/DerivedData   | -     | cache   | age!Xcode=xcode.open.reason | -     | rm-contents {path}                 | @xcode.derived.label         | du
+dev     | xcode       | ~/Library/Developer/Xcode/*DeviceSupport | -    | cache   | safe     | xcode.devicesupport.reason | rm-contents {path}                 | @xcode.devicesupport.label {name} | du
+dev     | xcode       | ~/Library/Developer/Xcode/Archives      | -     | cache   | manual   | xcode.archives.reason      | none                               | @xcode.archives.label        | du
+dev     | simulator   | ~/Library/Developer/CoreSimulator/Caches | -    | cache   | age      | -                          | rm-contents {path}                 | CoreSimulator/Caches         | du
+dev     | simulator   | ~/Library/Developer/CoreSimulator/Devices | xcrun | cache | safe     | sim.unavailable.reason     | cmd xcrun simctl delete unavailable | @sim.unavailable.label      | sim_unavailable_kb
+pkg     | homebrew    | $ brew --cache                          | brew  | cache   | safe     | homebrew.reason            | cmd brew cleanup --prune=all -s    | @homebrew.label              | du
+pkg     | npm         | ~/.npm/_cacache                         | -     | cache   | safe     | reason.redownloaded        | cmd npm cache clean --force        | @npm.label                   | du
+pkg     | pnpm        | $ pnpm store path                       | pnpm  | cache   | safe     | pnpm.reason                | cmd pnpm store prune               | @pnpm.label                  | du
+pkg     | yarn        | $ yarn cache dir                        | yarn  | cache   | safe     | reason.redownloaded        | cmd yarn cache clean               | @yarn.label                  | du
+pkg     | pip         | $ pip3 cache dir                        | pip3  | cache   | safe     | reason.redownloaded        | cmd pip3 cache purge               | @pip.label                   | du
+pkg     | uv          | $ uv cache dir                          | uv    | cache   | safe     | uv.reason                  | cmd uv cache prune                 | @uv.label                    | du
+pkg     | cargo       | ~/.cargo/registry/cache                 | -     | cache   | caution  | cargo.reason               | rm-contents {path}                 | @cargo.label                 | du
+pkg     | go          | ~/go/pkg/mod                            | -     | cache   | caution  | go.reason                  | cmd go clean -modcache             | @go.label                    | du
+pkg     | gradle      | ~/.gradle/caches                        | -     | cache   | age      | -                          | rm-contents {path}                 | @gradle.label                | du
+big     | trash       | ~/.Trash                                | -     | cache   | caution  | trash.reason               | rm-contents {path}                 | ~/.Trash                     | du
+big     | ios_backups | ~/Library/Application Support/MobileSync/Backup | - | cache | manual   | ios_backups.reason         | none                               | MobileSync/Backup            | du
+big     | mail        | ~/Library/Containers/com.apple.mail/Data/Library/Mail Downloads | - | cache | safe | mail.reason   | rm-contents {path}                 | @mail.label                  | du
+appdata | apple_container  | ~/Library/Application Support/com.apple.container | - | appdata | manual | apple_container.reason | none                     | @apple_container.label       | du
+appdata | model_macwhisper | ~/Library/Application Support/MacWhisper | -    | appdata | manual | macwhisper.reason        | none                               | @macwhisper.label            | du
+'
+
+# Tailles particulières (colonne taille) : TAILLE CHEMIN -> KiB.
+# old_files_kb : fichiers plus vieux que --days seulement (ce que rm-old-files retire).
+old_files_kb() {
+  find "$1" -type f -mtime +"$CACHE_DAYS" -print0 2>/dev/null | xargs -0 du -sk 2>/dev/null | awk '{s+=$1} END {print s+0}'
+}
+# sim_unavailable_kb : seuls les simulateurs que « delete unavailable » retire.
+sim_unavailable_kb() {
+  local u kb=0
+  for u in ${(f)"$(xcrun simctl list devices unavailable 2>/dev/null | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}' | sort -u)"}; do
+    (( kb += $(du_kb "$1/$u") ))
+  done
+  print -- $kb
+}
+
+# _source_fill MODÈLE CHEMIN : remplace les jetons {path} {tpath} {name} {days}.
+_source_fill() {
+  local t="$1" p="$2"
+  t="${t//\{path\}/$p}"; t="${t//\{tpath\}/${p/#$HOME/~}}"
+  t="${t//\{name\}/${p:t}}"; t="${t//\{days\}/$CACHE_DAYS}"
+  print -r -- "$t"
+}
+
+# probe_sources SECTION : sonde chaque source du catalogue de cette section et
+# propose ses candidats au registre (add_candidate applique le filet).
+probe_sources() {
+  setopt local_options extended_glob
+  local want="$1" line sec cat loc tool min verdict reason action label size
+  local p kb v r app key w label_txt
+  local -a f places words largs
+  for line in ${(f)SOURCES}; do
+    [[ "$line" == [[:space:]]#(\#*|) ]] && continue
+    f=("${(@s:|:)line}"); f=("${(@)${(@)f##[[:space:]]##}%%[[:space:]]##}")
+    sec="$f[1]" cat="$f[2]" loc="$f[3]" tool="$f[4]" min="$f[5]" verdict="$f[6]"
+    reason="$f[7]" action="$f[8]" label="$f[9]" size="$f[10]"
+    [[ "$sec" == "$want" ]] || continue
+    [[ "$tool" == - ]] || have "$tool" || continue
+    # Emplacement(s)
+    case "$loc" in
+      '$ '*)     places=("$(${(z)${loc#\$ }} 2>/dev/null)") ;;
+      '{syslogs}') places=("$SYSTEM_LOGS_DIR") ;;
+      *)         loc="${loc/#\~/$HOME}"
+                 if [[ "$loc" == *'*'* ]]; then places=(${~loc}(N/)); else places=("$loc"); fi ;;
+    esac
+    for p in "${places[@]}"; do
+      [[ -n "$p" && -d "$p" ]] || continue
+      if [[ "$size" == du ]]; then kb=$(du_kb "$p"); else kb=$($size "$p"); fi
+      (( kb >= SIZE_MIN[$min] )) || continue
+      # Verdict souhaité
+      case "$verdict" in
+        age*)
+          r=""
+          if [[ "$verdict" == age!* ]]; then
+            app="${${verdict#age!}%%=*}"; key="${verdict#*=}"
+            is_running "$app" && r="$(m $key)"
+          fi
+          IFS='|' read -r v r <<< "$(verdict_for "$p" "$CACHE_DAYS" "$r")" ;;
+        *) v="$verdict"; r="$(m $reason)" ;;
+      esac
+      # Action et libellé
+      words=()
+      for w in ${(z)action}; do words+=("$(_source_fill "$w" "$p")"); done
+      if [[ "$label" == @* ]]; then
+        largs=(); for w in ${(z)label#@}; do largs+=("$(_source_fill "$w" "$p")"); done
+        label_txt="$(m "${largs[@]}")"
+      else
+        label_txt="$(_source_fill "$label" "$p")"
+      fi
+      add_candidate "$cat" "$label_txt" "$p" "$kb" "$(newest_age_days "$p")" "$v" "$r" "$(new_action "${words[@]}")"
+    done
+  done
+}
+
 scan_cache_dir() {  # scan_cache_dir CATEGORIE RACINE  (chaque sous-dossier devient un candidat)
   local cat="$1" root="$2" d kb age v reason forced
   [[ -d "$root" ]] || return 0
   for d in "$root"/*(N); do
-    [[ "${d:t}" == "Homebrew" || "${d:t}" == "pip" ]] && continue   # gérés par leur outil (brew cleanup, pip cache purge)
+    [[ "${d:t}" == "Homebrew" || "${d:t}" == "pip" ]] && continue   # sources du catalogue (brew cleanup, pip cache purge)
     is_model_area "$d" && continue   # modèles IA : règle des modèles (section 4)
-    kb=$(du_kb "$d"); (( kb < 10240 )) && continue   # < 10 MiB : pas la peine
+    kb=$(du_kb "$d"); (( kb >= SIZE_MIN[cache] )) || continue
     age=$(newest_age_days "$d")
     forced=""
     case "${d:t}" in
@@ -1150,76 +1277,15 @@ audit_caches() {
   info "~/Library/Caches…";   scan_cache_dir cache_app "$HOME/Library/Caches"
   info "~/.cache…";           scan_cache_dir cache_cli "$HOME/.cache"
 
-  # Journaux
-  for logroot in "$HOME/Library/Logs" "$SYSTEM_LOGS_DIR" "$HOME/Library/Logs/DiagnosticReports"; do
-    [[ -d "$logroot" ]] || continue
-    kb=$(find "$logroot" -type f -mtime +"$CACHE_DAYS" -print0 2>/dev/null | xargs -0 du -sk 2>/dev/null | awk '{s+=$1} END {print s+0}')
-    (( kb < 5120 )) && continue
-    add_candidate logs "$(m logs.label "${logroot/#$HOME/~}" "$CACHE_DAYS")" "$logroot" "$kb" "$CACHE_DAYS+" \
-      safe "$(m logs.reason)" "$(new_action rm-old-files "$logroot" "$CACHE_DAYS")"
-  done
+  probe_sources logs
 
-  # Outils développeur
   h2 "$(m dev.title)"
-  XC="$HOME/Library/Developer/Xcode"
-  if [[ -d "$XC/DerivedData" ]]; then
-    kb=$(du_kb "$XC/DerivedData"); forced=""; is_running Xcode && forced="$(m xcode.open.reason)"
-    IFS='|' read -r v reason <<< "$(verdict_for "$XC/DerivedData" "$CACHE_DAYS" "$forced")"
-    (( kb > 0 )) && add_candidate xcode "$(m xcode.derived.label)" "$XC/DerivedData" "$kb" "$(newest_age_days "$XC/DerivedData")" "$v" "$reason" "$(new_action rm-contents "$XC/DerivedData")"
-  fi
-  for ds in "$XC"/*DeviceSupport(N); do
-    kb=$(du_kb "$ds"); (( kb > 0 )) && add_candidate xcode "$(m xcode.devicesupport.label "${ds:t}")" "$ds" "$kb" "$(newest_age_days "$ds")" \
-      safe "$(m xcode.devicesupport.reason)" "$(new_action rm-contents "$ds")"
-  done
-  [[ -d "$XC/Archives" ]] && { kb=$(du_kb "$XC/Archives"); (( kb > 0 )) && add_candidate xcode "$(m xcode.archives.label)" "$XC/Archives" "$kb" "$(newest_age_days "$XC/Archives")" \
-      manual "$(m xcode.archives.reason)" "none"; }
-  CS="$HOME/Library/Developer/CoreSimulator"
-  if [[ -d "$CS/Caches" ]]; then
-    kb=$(du_kb "$CS/Caches")
-    IFS='|' read -r v reason <<< "$(verdict_for "$CS/Caches" "$CACHE_DAYS")"
-    (( kb > 0 )) && add_candidate simulator "CoreSimulator/Caches" "$CS/Caches" "$kb" "$(newest_age_days "$CS/Caches")" "$v" "$reason" "$(new_action rm-contents "$CS/Caches")"
-  fi
-  if [[ -d "$CS/Devices" ]] && have xcrun; then
-    # Taille = celle des seuls simulateurs que « delete unavailable » retire.
-    kb=0
-    for u in ${(f)"$(xcrun simctl list devices unavailable 2>/dev/null | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}' | sort -u)"}; do
-      (( kb += $(du_kb "$CS/Devices/$u") ))
-    done
-    (( kb > 0 )) && add_candidate simulator "$(m sim.unavailable.label)" "$CS/Devices" "$kb" "-" \
-      safe "$(m sim.unavailable.reason)" "$(new_action cmd xcrun simctl delete unavailable)"
-  fi
+  probe_sources dev
 
-  # Gestionnaires de paquets
   h2 "$(m pkg.title)"
-  if have brew; then
-    bc=$(brew --cache 2>/dev/null); kb=$(du_kb "$bc")
-    (( kb > 0 )) && add_candidate homebrew "$(m homebrew.label)" "$bc" "$kb" "$(newest_age_days "$bc")" \
-      safe "$(m homebrew.reason)" "$(new_action cmd brew cleanup --prune=all -s)"
-  fi
-  [[ -d "$HOME/.npm/_cacache" ]] && { kb=$(du_kb "$HOME/.npm/_cacache"); (( kb > 0 )) && add_candidate npm "$(m npm.label)" "$HOME/.npm/_cacache" "$kb" "$(newest_age_days "$HOME/.npm/_cacache")" \
-      safe "$(m reason.redownloaded)" "$(new_action cmd npm cache clean --force)"; }
-  if have pnpm; then
-    ps_=$(pnpm store path 2>/dev/null); [[ -d "$ps_" ]] && { kb=$(du_kb "$ps_"); (( kb > 0 )) && add_candidate pnpm "$(m pnpm.label)" "$ps_" "$kb" "$(newest_age_days "$ps_")" \
-      safe "$(m pnpm.reason)" "$(new_action cmd pnpm store prune)"; }
-  fi
-  if have yarn; then
-    yc=$(yarn cache dir 2>/dev/null); [[ -d "$yc" ]] && { kb=$(du_kb "$yc"); (( kb > 10240 )) && add_candidate yarn "$(m yarn.label)" "$yc" "$kb" "$(newest_age_days "$yc")" \
-      safe "$(m reason.redownloaded)" "$(new_action cmd yarn cache clean)"; }
-  fi
-  have pip3 && { pc=$(pip3 cache dir 2>/dev/null); [[ -d "$pc" && "$pc" != "$HOME/Library/Caches/pip" ]] && { kb=$(du_kb "$pc"); (( kb > 10240 )) && add_candidate pip "$(m pip.label)" "$pc" "$kb" "$(newest_age_days "$pc")" safe "$(m reason.redownloaded)" "$(new_action cmd pip3 cache purge)"; }; }
-  have uv && { uc=$(uv cache dir 2>/dev/null); [[ -d "$uc" ]] && { kb=$(du_kb "$uc"); (( kb > 10240 )) && add_candidate uv "$(m uv.label)" "$uc" "$kb" "$(newest_age_days "$uc")" safe "$(m uv.reason)" "$(new_action cmd uv cache prune)"; }; }
-  CR="$HOME/.cargo/registry/cache"   # seule partie vidée : la taille porte sur elle
-  [[ -d "$CR" ]] && { kb=$(du_kb "$CR"); (( kb > 10240 )) && add_candidate cargo "$(m cargo.label)" "$CR" "$kb" "$(newest_age_days "$CR")" \
-      caution "$(m cargo.reason)" "$(new_action rm-contents "$CR")"; }
-  [[ -d "$HOME/go/pkg/mod" ]] && { kb=$(du_kb "$HOME/go/pkg/mod"); (( kb > 10240 )) && add_candidate go "$(m go.label)" "$HOME/go/pkg/mod" "$kb" "$(newest_age_days "$HOME/go/pkg/mod")" \
-      caution "$(m go.reason)" "$(new_action cmd go clean -modcache)"; }
-  if [[ -d "$HOME/.gradle/caches" ]]; then
-    kb=$(du_kb "$HOME/.gradle/caches")
-    IFS='|' read -r v reason <<< "$(verdict_for "$HOME/.gradle/caches" "$CACHE_DAYS")"
-    (( kb > 10240 )) && add_candidate gradle "$(m gradle.label)" "$HOME/.gradle/caches" "$kb" "$(newest_age_days "$HOME/.gradle/caches")" "$v" "$reason" "$(new_action rm-contents "$HOME/.gradle/caches")"
-  fi
+  probe_sources pkg
 
-  # Docker
+  # Docker : pas d'emplacement à mesurer, l'outil annonce lui-même ce qu'il récupère.
   if have docker && docker info >/dev/null 2>&1; then
     h2 "$(m docker.title)"
     docker system df 2>/dev/null | sed 's/^/    /'
@@ -1285,7 +1351,7 @@ scan_model_root() {  # scan_model_root CATEGORIE RACINE  (le libellé de catégo
   [[ -d "$root" ]] || return 0
   h2 "$(m cat.$cat)"
   for d in "$root"/*(N/); do
-    kb=$(du_kb "$d"); (( kb < 51200 )) && continue   # < 50 MiB
+    kb=$(du_kb "$d"); (( kb >= SIZE_MIN[bulky] )) || continue
     age=$(newest_age_days "$d")
     add_model "$cat" "${d:t}" "$d" "$kb" "$age" 0 "$(m model.old.reason "$age" "$MODEL_DAYS")" "$(new_action rm-path "$d")"
   done
@@ -1331,15 +1397,7 @@ audit_big() {
     done
   fi
 
-  # Corbeille
-  kb=$(du_kb "$HOME/.Trash")
-  (( kb > 10240 )) && add_candidate trash "~/.Trash" "$HOME/.Trash" "$kb" "$(newest_age_days "$HOME/.Trash")" caution "$(m trash.reason)" "$(new_action rm-contents "$HOME/.Trash")"
-
-  # Sauvegardes iOS, pièces jointes Mail
-  MB="$HOME/Library/Application Support/MobileSync/Backup"
-  [[ -d "$MB" ]] && { kb=$(du_kb "$MB"); (( kb > 10240 )) && add_candidate ios_backups "MobileSync/Backup" "$MB" "$kb" "$(newest_age_days "$MB")" manual "$(m ios_backups.reason)" "none"; }
-  MD="$HOME/Library/Containers/com.apple.mail/Data/Library/Mail Downloads"
-  [[ -d "$MD" ]] && { kb=$(du_kb "$MD"); (( kb > 10240 )) && add_candidate mail "$(m mail.label)" "$MD" "$kb" "$(newest_age_days "$MD")" safe "$(m mail.reason)" "$(new_action rm-contents "$MD")"; }
+  probe_sources big
 
   # node_modules / .venv / target de projets inactifs
   h2 "$(m deps.title)"
@@ -1347,7 +1405,7 @@ audit_big() {
     -not -path "$HOME/Library/*" -not -path "$HOME/.*" 2>/dev/null | while read -r d; do
     proj="${d:h}"
     [[ "${d:t}" == "target" && ! -f "$proj/Cargo.toml" ]] && continue
-    kb=$(du_kb "$d"); (( kb < 51200 )) && continue
+    kb=$(du_kb "$d"); (( kb >= SIZE_MIN[bulky] )) || continue
     age=$(newest_age_days "$proj")
     (( age < ACTIVE_DAYS )) && continue
     add_candidate inactive_project "${proj/#$HOME/~}/${d:t}" "$d" "$kb" "$age" caution "$(m deps.reason "$age")" "$(new_action rm-path "$d")"
@@ -1369,10 +1427,7 @@ audit_big() {
       info "$(printf '%9s' "$(human $kb)")  ${d/#$HOME/~}"
     done
 
-  AC="$HOME/Library/Application Support/com.apple.container"
-  [[ -d "$AC" ]] && { kb=$(du_kb "$AC"); (( kb > 102400 )) && add_candidate apple_container "$(m apple_container.label)" "$AC" "$kb" "$(newest_age_days "$AC")" manual "$(m apple_container.reason)" "none"; }
-  MW="$HOME/Library/Application Support/MacWhisper"
-  [[ -d "$MW" ]] && { kb=$(du_kb "$MW"); (( kb > 102400 )) && add_candidate model_macwhisper "$(m macwhisper.label)" "$MW" "$kb" "$(newest_age_days "$MW")" manual "$(m macwhisper.reason)" "none"; }
+  probe_sources appdata
 
   # Top dossiers du home (vue d'ensemble)
   if (( ! FAST )); then
@@ -1402,10 +1457,10 @@ show_plan() {
 
   typeset -ga ORDER; ORDER=()
   # tri par taille décroissante
-  for i in {1..${#CAND_PATH}}; do print -- "${CAND_KB[$i]} $i"; done | sort -rn | awk '{print $2}' | while read -r i; do ORDER+=("$i"); done
+  for (( i = 1; i <= ${#CAND_PATH}; i++ )); do print -- "${CAND_KB[$i]} $i"; done | sort -rn | awk '{print $2}' | while read -r i; do ORDER+=("$i"); done
 
   SAFE_KB=0 CAUT_KB=0 MAN_KB=0 SAFE_N=0 CAUT_N=0 MAN_N=0
-  for i in {1..${#CAND_PATH}}; do
+  for (( i = 1; i <= ${#CAND_PATH}; i++ )); do
     case "${CAND_VERDICT[$i]}" in
       safe)    (( SAFE_KB += CAND_KB[$i] )); (( SAFE_N++ )) ;;
       caution) (( CAUT_KB += CAND_KB[$i] )); (( CAUT_N++ )) ;;

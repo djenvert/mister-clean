@@ -87,7 +87,7 @@ test_simulateurs_ne_compte_que_les_indisponibles() {
 }
 
 test_brew_execute_sans_eval_de_bout_en_bout() {
-  make_file "$H/Library/Caches/Homebrew-test/bottle.tar.gz" 2048 100
+  make_file "$H/Library/Caches/Homebrew-test/bottle.tar.gz" 12288 100
   fake_tool brew '[[ "$1" == --cache ]] && print -r -- "$HOME/Library/Caches/Homebrew-test"'
   run_script --yes --skip-spotlight --lang fr
   assert_status 0
