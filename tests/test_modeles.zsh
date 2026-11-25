@@ -92,3 +92,25 @@ test_bout_en_bout_le_seuil_vaut_pour_toutes_les_sources() {
   assert_contains "$(section 'B. PRUDENCE' | grep charge:7b)" "actuellement chargé"
   assert_contains "$(section 'B. PRUDENCE' | grep ouvert)" "fichier ouvert"
 }
+
+# --- Racines de modèles dans le catalogue (issue #20) -------------------------
+
+test_une_ligne_model_avec_joker_donne_un_candidat_par_modele() {
+  make_file "$H/.outil-ia/modeles/ancien/poids.bin" 60000 200
+  make_file "$H/.outil-ia/modeles/recent/poids.bin" 60000 3
+  make_file "$H/.outil-ia/modeles/petit/poids.bin" 100 200
+  age_path "$H/.outil-ia/modeles/ancien" 200; age_path "$H/.outil-ia/modeles/recent" 3
+  in_sandbox 'MODEL_DAYS=90; SOURCES="
+models | model_torch | ~/.outil-ia/modeles/* | - | bulky | model | model.old.reason | rm-path {path} | {name} | du
+"
+    probe_sources models >/dev/null
+    for (( i = 1; i <= ${#CAND_PATH}; i++ )); do
+      print -r -- "${CAND_LABEL[i]}|${CAND_VERDICT[i]}|${CAND_REASON[i]}|$(describe_action "${CAND_ACTION[i]}")"
+    done
+    is_model_area "$HOME/.outil-ia" && print zone-modeles'
+  assert_status 0
+  assert_contains "$OUT" "ancien|caution|non touché depuis 200 j ≥ 90 j ; retéléchargeable|supprimer ~/.outil-ia/modeles/ancien"
+  assert_contains "$OUT" "recent|manual|récent (3 j) — conservé|"
+  assert_not_contains "$OUT" "petit|"
+  assert_contains "$OUT" "zone-modeles"
+}

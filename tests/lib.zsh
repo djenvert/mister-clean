@@ -118,9 +118,9 @@ CATALOGUE_CHECK='
       [[ "$line" == [[:space:]]#(\#*|) ]] && continue
       f=("${(@s:|:)line}"); f=("${(@)${(@)f##[[:space:]]##}%%[[:space:]]##}")
       (( ${#f} == 10 )) || { print "colonnes: $line"; continue; }
-      [[ $f[1] == (logs|dev|pkg|big|appdata) ]] || print "section: $line"
+      [[ $f[1] == (logs|dev|pkg|models|big|appdata) ]] || print "section: $line"
       [[ -n "${SIZE_MIN[$f[5]]-}" ]] || print "seuil: $line"
-      [[ $f[6] == (safe|caution|manual|age|age!*=*) ]] || print "verdict: $line"
+      [[ $f[6] == (safe|caution|manual|age|age!*=*|model) ]] || print "verdict: $line"
       for lang in fr en; do
         messages_$lang
         [[ -n "${MSG[cat.$f[2]]-}" ]] || print "cat.$f[2] ($lang)"
