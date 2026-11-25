@@ -1131,6 +1131,7 @@ scan_cache_dir() {  # scan_cache_dir CATEGORIE RACINE  (chaque sous-dossier devi
   [[ -d "$root" ]] || return 0
   for d in "$root"/*(N); do
     [[ "${d:t}" == "Homebrew" || "${d:t}" == "pip" ]] && continue   # gérés par leur outil (brew cleanup, pip cache purge)
+    is_model_area "$d" && continue   # modèles IA : règle des modèles (section 4)
     kb=$(du_kb "$d"); (( kb < 10240 )) && continue   # < 10 MiB : pas la peine
     age=$(newest_age_days "$d")
     forced=""
@@ -1242,6 +1243,43 @@ rel_to_days() {  # "3 weeks ago" -> 21  (sortie anglaise d'ollama list)
   esac
 }
 
+# add_model CAT LABEL CHEMIN KB ÂGE CHARGÉ RAISON_SI_ANCIEN ACTION
+# Règle unique pour tous les modèles IA locaux, quelle que soit la source :
+#   chargé en mémoire (CHARGÉ=1)  → caution (« actuellement chargé »)
+#   ÂGE ≥ --model-days            → caution, RAISON_SI_ANCIEN (propre à la
+#                                   source : comment récupérer le modèle)
+#   sinon                         → manual : récent, conservé
+# Un modèle n'est donc jamais safe. Le registre (add_candidate) rétrograde en
+# caution un modèle en conflit (projet en cours, fichier ouvert).
+add_model() {
+  local cat="$1" label="$2" p="$3" kb="$4" age="$5" loaded="$6" old_reason="$7" action="$8" v reason
+  if (( loaded )); then v=caution; reason="$(m model.loaded.reason)"
+  elif (( age >= MODEL_DAYS )); then v=caution; reason="$old_reason"
+  else v=manual; reason="$(m model.recent.reason "$age")"; fi
+  add_candidate "$cat" "$label" "$p" "$kb" "$age" "$v" "$reason" "$action"
+}
+
+# Dossiers de modèles : chaque sous-dossier d'une racine est un modèle
+# (paires CATÉGORIE RACINE). Le scan des caches (~/.cache) les ignore : ils
+# relèvent de la règle des modèles, pas de celle des caches.
+typeset -ga MODEL_ROOTS
+MODEL_ROOTS=(
+  model_huggingface "$HOME/.cache/huggingface/hub"
+  model_lmstudio    "$HOME/.lmstudio/models"
+  model_lmstudio    "$HOME/.cache/lm-studio/models"
+  model_whisper     "$HOME/.cache/whisper"
+  model_torch       "$HOME/.cache/torch/hub/checkpoints"
+)
+
+# is_model_area CHEMIN : vrai si CHEMIN est une racine de modèles ou en contient une.
+is_model_area() {
+  local root
+  for root in "${(@)MODEL_ROOTS:#model_*}"; do   # les racines, sans les catégories
+    [[ "$root" == "$1" || "$root" == "$1"/* ]] && return 0
+  done
+  return 1
+}
+
 scan_model_root() {  # scan_model_root CATEGORIE RACINE  (le libellé de catégorie sert de titre)
   local cat="$1" root="$2" d kb age
   [[ -d "$root" ]] || return 0
@@ -1249,9 +1287,7 @@ scan_model_root() {  # scan_model_root CATEGORIE RACINE  (le libellé de catégo
   for d in "$root"/*(N/); do
     kb=$(du_kb "$d"); (( kb < 51200 )) && continue   # < 50 MiB
     age=$(newest_age_days "$d")
-    if (( age >= MODEL_DAYS )); then v=caution; reason="$(m model.old.reason "$age" "$MODEL_DAYS")"
-    else v=manual; reason="$(m model.recent.reason "$age")"; fi
-    add_candidate "$cat" "${d:t}" "$d" "$kb" "$age" "$v" "$reason" "$(new_action rm-path "$d")"
+    add_model "$cat" "${d:t}" "$d" "$kb" "$age" 0 "$(m model.old.reason "$age" "$MODEL_DAYS")" "$(new_action rm-path "$d")"
   done
 }
 
@@ -1269,22 +1305,16 @@ audit_models() {
       case "$unit" in GB) kb=$(( sz * 1048576 )) ;; MB) kb=$(( sz * 1024 )) ;; *) kb=0 ;; esac
       kb=${kb%.*}
       if [[ "$n" == "About" || "$n" == "an" || "$n" == "a" ]]; then days=0; else days=$(rel_to_days "$n" "$u"); fi
-      if [[ " $LOADED " == *" $name "* ]]; then
-        v=caution; reason="$(m model.loaded.reason)"
-      elif (( days >= MODEL_DAYS )); then
-        v=caution; reason="$(m model.ollama_old.reason "$days" "$MODEL_DAYS" "$name")"
-      else
-        v=manual; reason="$(m model.recent.reason "$days")"
-      fi
-      add_candidate model_ollama "$name" "ollama:$name" "$kb" "$days" "$v" "$reason" "$(new_action cmd ollama rm "$name")"
+      loaded=0; [[ " $LOADED " == *" $name "* ]] && loaded=1
+      add_model model_ollama "$name" "ollama:$name" "$kb" "$days" "$loaded" \
+        "$(m model.ollama_old.reason "$days" "$MODEL_DAYS" "$name")" "$(new_action cmd ollama rm "$name")"
     done
   fi
 
-  scan_model_root model_huggingface "$HOME/.cache/huggingface/hub"
-  scan_model_root model_lmstudio    "$HOME/.lmstudio/models"
-  scan_model_root model_lmstudio    "$HOME/.cache/lm-studio/models"
-  scan_model_root model_whisper     "$HOME/.cache/whisper"
-  scan_model_root model_torch       "$HOME/.cache/torch/hub/checkpoints"
+  local i
+  for (( i = 1; i < ${#MODEL_ROOTS}; i += 2 )); do
+    scan_model_root "${MODEL_ROOTS[i]}" "${MODEL_ROOTS[i+1]}"
+  done
 }
 
 # ----------------------------------------------------------------------------
