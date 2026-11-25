@@ -1,0 +1,4 @@
+#!/bin/zsh -f
+# Aucun processus Spotlight.
+source "${0:h}/_record"
+print '%CPU COMM'

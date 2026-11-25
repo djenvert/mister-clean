@@ -1,0 +1,5 @@
+#!/bin/zsh -f
+# Volume fictif de 500 Gio dont 300 Gio utilisés, quel que soit le chemin demandé.
+source "${0:h}/_record"
+print 'Filesystem     1024-blocks      Used Available Capacity iused ifree %iused  Mounted on'
+print '/dev/disk3s5      524288000 314572800 209715200    60%       1     1    0%   /System/Volumes/Data'

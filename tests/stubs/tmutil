@@ -1,0 +1,3 @@
+#!/bin/zsh -f
+# Aucun snapshot Time Machine local.
+source "${0:h}/_record"

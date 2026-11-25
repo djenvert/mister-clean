@@ -1,0 +1,5 @@
+#!/bin/zsh -f
+# Outil interdit pendant les tests (droits élevés ou Spotlight) : l'appel est
+# noté puis échoue, sans rien faire.
+source "${0:h}/_record"
+exit 1

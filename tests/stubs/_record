@@ -1,0 +1,4 @@
+#!/bin/zsh -f
+# Inclus par chaque outil simulé : note l'appel (nom + arguments) dans le
+# journal des appels du bac à sable, pour que les tests puissent l'inspecter.
+[[ -n "${MC_STUB_CALLS-}" ]] && print -r -- "${ZSH_ARGZERO:t} $*" >> "$MC_STUB_CALLS"
