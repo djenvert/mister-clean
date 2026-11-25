@@ -6,10 +6,11 @@
 #
 # Aide : ./mister-clean.sh --help
 #
-# Tous les textes affichés (aide comprise) vivent dans le catalogue de messages
-# (fonction messages_fr) ; la logique ne manipule que des clés et des valeurs
-# internes indépendantes de la langue (verdicts safe / caution / manual,
-# catégories cache_app, xcode…).
+# Tous les textes affichés (aide comprise) vivent dans les catalogues de
+# messages (fonctions messages_fr et messages_en, choisies par --lang ou par
+# la locale) ; la logique ne manipule que des clés et des valeurs internes
+# indépendantes de la langue (verdicts safe / caution / manual, catégories
+# cache_app, xcode…).
 # =============================================================================
 
 emulate -L zsh
@@ -52,6 +53,9 @@ Options :
   --top N            Nombre de lignes dans les classements (20).
   --fast             Saute les étapes lentes (journal système, du profonds).
   --skip-spotlight   Saute l'audit Spotlight.
+  --lang fr|en       Langue des messages. Par défaut : déduite de LC_ALL,
+                     puis LC_MESSAGES, puis LANG (le premier non vide) ;
+                     anglais si ce n'est ni du français ni de l'anglais.
   -h, --help         Cette aide.
 
 Verdicts :
@@ -67,6 +71,7 @@ EOF
 
     # --- Erreurs de démarrage
     err.unknown_option      "Option inconnue : %s (voir --help)"
+    err.bad_lang            "Langue non prise en charge : %s (valeurs possibles : fr, en)"
     err.macos_only          "Ce script est conçu pour macOS uniquement."
 
     # --- Unités de taille (human)
@@ -289,6 +294,271 @@ EOF
   )
 }
 
+messages_en() {
+  MSG=(
+    # --- Help (--help), printed as is, no printf interpretation
+    help "$(cat <<'EOF'
+=============================================================================
+mister-clean.sh — macOS disk audit: Spotlight, caches, old AI models,
+                  large folders, protection of active projects, and a
+                  cleanup plan (printed with --dry-run, executed after
+                  confirmation otherwise).
+
+Usage:
+  ./mister-clean.sh --dry-run            # audit + plan, nothing deleted
+  ./mister-clean.sh                      # audit + plan + confirmation + execution
+
+Options:
+  --dry-run          Execute nothing, only print the plan.
+  --yes              Run SAFE actions without asking (CAUTION actions are
+                     still asked one by one, never auto-accepted).
+  --days N           A cache untouched for N days counts as "unused" (30).
+  --model-days N     A model untouched for N days counts as "old" (90).
+  --active-days N    A project modified within N days counts as "active" (30).
+  --top N            Number of rows in the rankings (20).
+  --fast             Skip slow steps (system log, deep du).
+  --skip-spotlight   Skip the Spotlight audit.
+  --lang fr|en       Message language. Default: taken from LC_ALL, then
+                     LC_MESSAGES, then LANG (first non-empty one);
+                     English if that is neither French nor English.
+  -h, --help         This help.
+
+Verdicts:
+  SAFE      Regenerable cache, no open file, no active project involved
+            → deleted in one batch after the global confirmation.
+  CAUTION   Recoverable but costly (models, snapshots, recent caches…)
+            → asked item by item.
+  MANUAL    Never touched by the script (Xcode archives, iOS backups,
+            Downloads…) → only listed.
+=============================================================================
+EOF
+)"
+
+    # --- Startup errors
+    err.unknown_option      "Unknown option: %s (see --help)"
+    err.bad_lang            "Unsupported language: %s (expected fr or en)"
+    err.macos_only          "This script is designed for macOS only."
+
+    # --- Size units (human)
+    unit.tib                "%.1f TiB"
+    unit.gib                "%.1f GiB"
+    unit.mib                "%.0f MiB"
+    unit.kib                "%d KiB"
+
+    # --- Verdicts (internal values: safe, caution, manual)
+    verdict.safe            "SAFE"
+    verdict.caution         "CAUTION"
+    verdict.manual          "MANUAL"
+
+    # --- Candidate categories (internal values after "cat.")
+    cat.spotlight           "Spotlight"
+    cat.cache_app           "App cache"
+    cat.cache_cli           "CLI cache"
+    cat.logs                "Logs"
+    cat.xcode               "Xcode"
+    cat.simulator           "Simulator"
+    cat.homebrew            "Homebrew"
+    cat.npm                 "npm"
+    cat.pnpm                "pnpm"
+    cat.yarn                "yarn"
+    cat.pip                 "pip"
+    cat.uv                  "uv"
+    cat.cargo               "cargo"
+    cat.go                  "go"
+    cat.gradle              "gradle"
+    cat.docker              "Docker"
+    cat.model_ollama        "Ollama model"
+    cat.model_huggingface   "Hugging Face model"
+    cat.model_lmstudio      "LM Studio model"
+    cat.model_whisper       "Whisper model"
+    cat.model_torch         "Torch model"
+    cat.model_macwhisper    "MacWhisper model"
+    cat.tm_snapshot         "TM snapshot"
+    cat.trash               "Trash"
+    cat.ios_backups         "iOS backups"
+    cat.mail                "Mail"
+    cat.inactive_project    "Inactive project"
+    cat.downloads           "Downloads"
+    cat.apple_container     "Apple Container"
+
+    # --- Header
+    header.title            "{bold}{cyan}mister-clean v%s{reset} — %s  %s"
+    header.dry_run          "[DRY-RUN]"
+    header.system           "macOS %s · %s · log: %s"
+    header.thresholds       "Thresholds: unused cache ≥ %s d · old model ≥ %s d · active project ≤ %s d"
+
+    # --- 0. Disk
+    disk.title              "0. Disk state"
+    disk.volume             "Data volume: %s used / %s · free: %s"
+    disk.purgeable          "Purgeable space (macOS can free it by itself): %s"
+    disk.snapshots          "Local Time Machine snapshots: %s"
+    disk.fda_ok             "Full Disk Access: OK for this terminal."
+    disk.fda_missing        "This terminal does NOT have Full Disk Access (System Settings > Privacy & Security)."
+    disk.fda_consequence    "The Spotlight sample/probe tests will be marked INCONCLUSIVE, and some caches will not be visible."
+
+    # --- 1. Active projects
+    active.title            "1. Active projects and open files (safety net)"
+    active.scanning_git     "Git repositories modified within %s d…"
+    active.scanning_lsof    "Files open by your processes (lsof)…"
+    active.found            "%s project(s) considered active — nothing will be touched there:"
+    active.none             "No active project detected."
+    active.open_files       "%s open files under ~ (any cache containing one of them is downgraded to CAUTION)."
+    active.running_apps     "Running apps: %s"
+
+    # --- 2. Spotlight
+    spot.title              "2. Spotlight — index cross-verification"
+    spot.mdutil.title       "2a. Indexing state per volume (mdutil)"
+    spot.mdutil.enabled     "%s: %s"
+    spot.mdutil.disabled    "%s: %s (volume excluded from Spotlight — no index to clean)"
+    spot.mdutil.unreachable "%s: not reachable from this terminal (%s)"
+    spot.mdutil.abnormal    "%s: %s"
+    spot.size.title         "2b. Index size vs data size"
+    spot.size.system        "System index: %s (%s %% of data). Normal: 0.5 – 3 %%."
+    spot.size.bloated       "Abnormally high ratio → bloated/stale index likely."
+    spot.size.no_sudo       "System index not measurable without sudo (Full Disk Access required). Run 'sudo -v' first if needed."
+    spot.size.user          "User index (CoreSpotlight): %s"
+    spot.sample.title       "2c. Cross-check #1 — sample of real files vs index"
+    spot.sample.dir         "Sampled folder: %s"
+    spot.sample.missing     "missing from index: %s"
+    spot.sample.inconclusive "INCONCLUSIVE: %s / %s missing, but mdfind is restricted without Full Disk Access. Rerun from Terminal.app with access granted."
+    spot.sample.empty       "No file to sample in %s."
+    spot.sample.bad         "%s / %s files (%s %%) exist on disk but are unknown to Spotlight → incomplete/corrupted index."
+    spot.sample.warn        "%s / %s files missing from the index (%s %%) — tolerable, but worth watching."
+    spot.sample.ok          "%s / %s files missing from the index (%s %%) — the index reflects the disk."
+    spot.probe.title        "2d. Cross-check #2 — live probe (is the daemon still indexing?)"
+    spot.probe.ok           "New file indexed in %s s — mds is working."
+    spot.probe.inconclusive "INCONCLUSIVE: probe not visible, but mdfind is restricted for this terminal (see above)."
+    spot.probe.bad          "New file still not indexed after 15 s → indexing stalled or broken."
+    spot.log.title          "2e. Cross-check #3 — system log and mds processes"
+    spot.log.skipped        "(--fast) system log skipped."
+    spot.log.bad            "%s message(s) hinting at index corruption in the last 2 hours:"
+    spot.log.ok             "No corruption message in the mds log (2 h)."
+    spot.cpu.high           "mds/mdworker use %s %% CPU: reindexing in progress or stuck in a loop."
+    spot.cpu.info           "Combined mds/mdworker CPU: %s %%"
+    spot.verdict.title      "2f. Spotlight verdict"
+    spot.verdict.inconclusive "No sign of corruption on the available tests, but 2 of 3 tests are INCONCLUSIVE without Full Disk Access."
+    spot.verdict.healthy    "Index HEALTHY: the {bold}3 cross-checks{reset} agree (sample, probe, log). No rebuild needed."
+    spot.verdict.suspect    "Index SUSPECT (%s clue(s)):"
+    spot.finding.mdutil     "mdutil reports an abnormal state on %s: %s"
+    spot.finding.ratio      "system index = %s %% of data (expected < 3 %%)"
+    spot.finding.sample     "%s/%s sampled files missing from the index"
+    spot.finding.probe      "probe not indexed after 15 s"
+    spot.finding.log        "%s corruption messages in the mds log"
+
+    # --- Common verdict reasons
+    reason.in_active_project "inside active project %s"
+    reason.open_file        "file open by a process: %s"
+    reason.recent           "modified less than %s d ago (still in use, will be regenerated)"
+    reason.unused           "untouched for ≥ %s d, regenerable"
+    reason.redownloaded     "re-downloaded on demand"
+    reason.sort_by_hand     "sort by hand"
+
+    # --- Candidates: labels and reasons, by source
+    spotlight.rebuild.label "Rebuild the Spotlight index (mdutil -E /)"
+    spotlight.rebuild.reason "suspect index; the rebuild wipes the bloated index then reindexes (CPU for 1–3 h)"
+
+    caches.title            "3. Cache scan"
+    caches.apple.reason     "Apple cache; regenerated but sometimes costly to rebuild (e.g. Photos, iCloud)"
+    caches.icloud.reason    "tied to iCloud"
+    logs.label              "%s (files > %s d)"
+    logs.reason             "old logs, worthless unless a diagnosis is in progress"
+
+    dev.title               "Developer tools"
+    xcode.open.reason       "Xcode is open: quit it first"
+    xcode.derived.label     "DerivedData (intermediate builds)"
+    xcode.devicesupport.label "%s (symbols of old OS versions)"
+    xcode.devicesupport.reason "re-downloaded the next time a device is plugged in"
+    xcode.archives.label    "Archives (.xcarchive + dSYM)"
+    xcode.archives.reason   "holds the symbols of shipped releases: sort by hand"
+    sim.unavailable.label   "Unavailable simulators (runtime uninstalled)"
+    sim.unavailable.reason  "xcrun simctl delete unavailable only removes orphaned simulators"
+
+    pkg.title               "Package managers"
+    homebrew.label          "download cache + old versions"
+    homebrew.reason         "brew cleanup --prune=all -s removes stale bottles and downloads"
+    npm.label               "npm cache (_cacache)"
+    pnpm.label              "pnpm store (orphaned packages)"
+    pnpm.reason             "pnpm store prune only removes unreferenced packages"
+    yarn.label              "yarn cache"
+    pip.label               "pip cache"
+    uv.label                "uv cache"
+    uv.reason               "uv cache prune only removes unused entries"
+    cargo.label             "Rust registry (sources + crates)"
+    cargo.reason            "re-downloaded on the next build, but slow when offline"
+    go.label                "Go module cache"
+    go.reason               "re-downloaded on the next build"
+    gradle.label            "Gradle caches"
+    docker.title            "Docker"
+    docker.label            "unused images/containers/volumes"
+    docker.reason           "reclaimable: %s; docker system prune (volumes kept)"
+
+    models.title            "4. Local AI models"
+    ollama.title            "Ollama"
+    ollama.store            "Store: ~/.ollama/models = %s  · loaded: %s"
+    ollama.none_loaded      "none"
+    ollama.age_note         "(Ollama does not track last use; age = date of pull / update.)"
+    model.loaded.reason     "currently loaded in memory"
+    model.ollama_old.reason "pulled %s d ago ≥ %s d; ollama pull %s to get it back"
+    model.old.reason        "untouched for %s d ≥ %s d; re-downloadable"
+    model.recent.reason     "recent (%s d) — kept"
+
+    big.title               "5. Large folders"
+    snapshot.reason         "size unknown before deletion; macOS purges them on its own when needed"
+    trash.reason            "irreversible once emptied"
+    ios_backups.reason      "manage in Finder > device > Manage Backups"
+    mail.label              "Mail Downloads (opened attachments)"
+    mail.reason             "temporary copies; the originals stay in the messages"
+    deps.title              "Dependencies of inactive projects (node_modules, .venv, target)"
+    deps.reason             "project inactive for %s d; reinstallable (npm i / pip / cargo)"
+    downloads.title         "Large downloads older than 90 d (list only)"
+    downloads.label         "~/Downloads: files > 100 MB and > 90 d"
+    appdata.title           "Top %s of ~/Library/Application Support and ~/Library/Containers (informational, MANUAL)"
+    apple_container.label   "images/VMs of Apple's 'container' tool"
+    apple_container.reason  "container image prune / container system stop, then delete by hand"
+    macwhisper.label        "downloaded Whisper models"
+    macwhisper.reason       "manage in MacWhisper > Models"
+    home.title              "Top %s folders of ~ (depth 2, overview)"
+
+    # --- 6. Plan
+    plan.title              "6. Cleanup plan"
+    action.rm_contents      "empty %s/"
+    action.rm_path          "delete %s"
+    action.rm_old_files     "delete files > %s d in %s"
+    plan.group.safe         "A. %s — run in one batch after confirmation (%s items, ≈ %s)"
+    plan.group.caution      "B. %s — asked one by one (%s items, ≈ %s)"
+    plan.group.manual       "C. %s — never touched by the script (%s items, ≈ %s)"
+    plan.group.empty        "(nothing)"
+    plan.summary            "{bold}Summary{reset}: safely reclaimable ≈ {green}%s{reset} · with caution ≈ {yellow}%s{reset} · to sort by hand ≈ %s"
+    plan.status             "Active projects protected: %s · Spotlight: %s"
+    plan.spotlight.suspect  "SUSPECT"
+    plan.spotlight.healthy  "healthy"
+    plan.dry_run            "--dry-run mode: nothing was deleted. Rerun without --dry-run to execute the plan."
+
+    # --- 7. Execution
+    exec.title              "7. Execution"
+    exec.path_refused       "path refused: %s"
+    exec.unknown_action     "unknown action: %s"
+    exec.confirm_safe       "Run the %s SAFE actions (≈ %s)? Type {bold}yes{reset}:"
+    exec.ok                 "ok"
+    exec.failed             "failed (see log)"
+    exec.safe_skipped       "SAFE actions skipped."
+    exec.caution_intro      "CAUTION actions — answer {bold}y{reset}es / {bold}N{reset}o / {bold}q{reset}uit for each one:"
+    exec.caution_choices    "[y/N/q]"
+    exec.done               "done"
+    exec.skipped            "skipped"
+    exec.caution_not_offered "CAUTION actions not offered (no interactive terminal)."
+    exec.summary            "{bold}Done{reset}: %s action(s) executed · space freed ≈ {green}%s{reset} · free now: %s"
+    exec.apfs_note          "(APFS sometimes frees space with a delay; deleted snapshots are purged in the background.)"
+    exec.log                "Full log: %s"
+
+    # --- Accepted answers to the prompts (space-separated words,
+    #     compared exactly, case included)
+    answer.confirm_yes      "yes y"
+    answer.item_yes         "y Y yes"
+    answer.item_quit        "q Q"
+  )
+}
+
 # m CLÉ [ARGS…] : écrit le message CLÉ formaté avec ARGS, sans saut de ligne.
 # Une clé absente du catalogue s'affiche « [clé] » plutôt que de faire échouer le script.
 m() {
@@ -311,7 +581,34 @@ answer_in() {
   (( ${words[(Ie)$2]} ))
 }
 
-messages_fr
+# ----------------------------------------------------------------------------
+# Langue
+# ----------------------------------------------------------------------------
+# --lang fr|en l'emporte. Sinon, la langue vient du premier non vide de
+# LC_ALL, LC_MESSAGES, LANG (ordre de priorité POSIX des locales) : fr, fr_*
+# ou fr.* → fr ; tout le reste → en. Repli : en (aucune variable, C, POSIX,
+# autre langue).
+# --lang est lu avant les autres options, pour que --help et « Option
+# inconnue » s'affichent déjà dans la bonne langue, quel que soit l'ordre.
+lang_from_env() {
+  case "${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}" in
+    fr|fr_*|fr.*) print fr ;;
+    *)            print en ;;
+  esac
+}
+
+UI_LANG="$(lang_from_env)"
+() {  # pré-lecture de --lang (la dernière occurrence l'emporte)
+  local i
+  for (( i = 1; i <= $#; i++ )); do
+    [[ "${argv[i]}" == --lang ]] || continue
+    case "${argv[i+1]-}" in
+      fr|en) UI_LANG="${argv[i+1]}"; (( i++ )) ;;
+      *) messages_$UI_LANG; print -u2 -- "$(m err.bad_lang "${argv[i+1]-}")"; exit 2 ;;
+    esac
+  done
+} "$@"
+messages_$UI_LANG
 
 # ----------------------------------------------------------------------------
 # Options
@@ -337,6 +634,7 @@ while (( $# > 0 )); do
     --top)            TOP="$2"; shift ;;
     --fast)           FAST=1 ;;
     --skip-spotlight) SKIP_SPOTLIGHT=1 ;;
+    --lang)           shift ;;   # déjà lue et validée plus haut (section Langue)
     -h|--help)        usage ;;
     *) print -u2 -- "$(m err.unknown_option "$1")"; exit 2 ;;
   esac
