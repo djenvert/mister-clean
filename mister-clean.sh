@@ -1206,6 +1206,7 @@ audit_spotlight() {
 #   - elle n'affiche que par h2 / info (et des listes indentées informatives) ;
 #   - si l'outil dont elle dépend est absent, elle ne fait rien et rend 0 ;
 #   - ses variables sont locales.
+# Voir docs/ajouter-une-source.md.
 typeset -ga PROBES
 PROBES=(
   caches:probe_app_caches
@@ -1280,7 +1281,8 @@ SIZE_MIN=(cache 10240 bulky 51200 appdata 102400)
 #            refuse lui-même s'il reste du travail).
 # Ajouter une règle : une branche dans source_verdict, documentée ici.
 #
-# Ajouter un outil = ajouter une ligne.
+# Ajouter un outil = ajouter une ligne. Guide complet (types de briques,
+# verdicts, messages, tests) : docs/ajouter-une-source.md
 SOURCES='
 logs    | logs        | ~/Library/Logs                          | -     | cache   | safe     | logs.reason                | rm-old-files {path} {days}         | @logs.label {tpath} {days}   | old_files_kb
 logs    | logs        | {syslogs}                               | -     | cache   | safe     | logs.reason                | rm-old-files {path} {days}         | @logs.label {tpath} {days}   | old_files_kb

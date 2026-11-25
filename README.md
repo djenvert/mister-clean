@@ -21,6 +21,10 @@ catégorie, taille, âge, libellé, raison, chemin, action). Le format est décr
 dans le script, section « 6. Plan de nettoyage ». L'affichage et l'exécution
 ne lisent que ce plan.
 
+Ajouter un outil ou une app que le script ne couvre pas encore (caches,
+journaux, modèles, worktrees d'agents…) : voir
+[docs/ajouter-une-source.md](docs/ajouter-une-source.md).
+
 ## Langue / Language
 
 Un seul script, en français ou en anglais. La langue ne change que les
