@@ -221,7 +221,7 @@ EOF
     pip.label               "cache pip"
     uv.label                "cache uv"
     uv.reason               "uv cache prune ne retire que l'inutilisé"
-    cargo.label             "registry Rust (sources + crates)"
+    cargo.label             "registry Rust (crates téléchargées)"
     cargo.reason            "retéléchargé au prochain build, mais lent hors-ligne"
     go.label                "cache modules Go"
     go.reason               "retéléchargé au prochain build"
@@ -274,7 +274,13 @@ EOF
 
     # --- 7. Exécution
     exec.title              "7. Exécution"
-    exec.path_refused       "chemin refusé : %s"
+    exec.path_refused       "chemin refusé : %s (%s)"
+    guard.empty             "chemin vide"
+    guard.relative          "chemin relatif"
+    guard.not_canonical     "chemin non canonique"
+    guard.symlink           "lien symbolique"
+    guard.root_or_home      "racine ou dossier personnel"
+    guard.outside           "hors de ~ et des emplacements autorisés"
     exec.unknown_action     "action inconnue : %s"
     exec.confirm_safe       "Exécuter les %s actions SÛRES (≈ %s) ? Tapez {bold}oui{reset} :"
     exec.ok                 "ok"
@@ -487,7 +493,7 @@ EOF
     pip.label               "pip cache"
     uv.label                "uv cache"
     uv.reason               "uv cache prune only removes unused entries"
-    cargo.label             "Rust registry (sources + crates)"
+    cargo.label             "Rust registry (downloaded crates)"
     cargo.reason            "re-downloaded on the next build, but slow when offline"
     go.label                "Go module cache"
     go.reason               "re-downloaded on the next build"
@@ -540,7 +546,13 @@ EOF
 
     # --- 7. Execution
     exec.title              "7. Execution"
-    exec.path_refused       "path refused: %s"
+    exec.path_refused       "path refused: %s (%s)"
+    guard.empty             "empty path"
+    guard.relative          "relative path"
+    guard.not_canonical     "non-canonical path"
+    guard.symlink           "symbolic link"
+    guard.root_or_home      "root or home folder"
+    guard.outside           "outside ~ and the allowed locations"
     exec.unknown_action     "unknown action: %s"
     exec.confirm_safe       "Run the %s SAFE actions (≈ %s)? Type {bold}yes{reset}:"
     exec.ok                 "ok"
@@ -790,6 +802,121 @@ verdict_for() {
 }
 
 # ----------------------------------------------------------------------------
+# Actions de nettoyage
+# ----------------------------------------------------------------------------
+# Une action est une liste de mots, rangée dans CAND_ACTION sous forme d'une
+# seule chaîne (chaque mot protégé par ${(q)…}) : espaces, deux-points et
+# autres caractères particuliers des chemins passent tels quels.
+#
+#   none                        rien à exécuter (candidat MANUEL)
+#   rm-contents CHEMIN          vider le dossier CHEMIN
+#   rm-path CHEMIN              supprimer CHEMIN
+#   rm-old-files CHEMIN JOURS   supprimer les fichiers de plus de JOURS j sous CHEMIN
+#   cmd OUTIL [ARGS…]           lancer un outil (brew, ollama, tmutil…)
+#   sudo OUTIL [ARGS…]          le même, avec droits élevés (via sudo)
+#
+# Les commandes ne sont jamais évaluées par le shell : OUTIL et chaque ARG
+# sont passés tels quels, même s'ils contiennent $( ), ;, *, espaces…
+#
+# new_action construit une action ; describe_action (plan) et run_action
+# (exécution) passent tous deux par action_do, où chaque genre définit côte à
+# côte sa description et son exécution. Toute suppression de fichiers passe
+# d'abord par deletion_guard.
+
+# Rapports de plantage système, seul dossier hors de ~ que le script nettoie.
+# MISTER_CLEAN_SYSTEM_LOGS le remplace (la suite de tests y met un dossier du
+# bac à sable, pour ne jamais toucher aux vrais journaux).
+SYSTEM_LOGS_DIR="${MISTER_CLEAN_SYSTEM_LOGS:-/Library/Logs/DiagnosticReports}"
+
+# Seuls emplacements hors de ~ où le script peut supprimer des fichiers
+# (eux-mêmes ou ce qu'ils contiennent). Tout autre chemin hors de ~ est refusé.
+typeset -ga DELETE_ALLOWED_OUTSIDE_HOME
+DELETE_ALLOWED_OUTSIDE_HOME=("$SYSTEM_LOGS_DIR")
+
+# Raison du dernier refus de deletion_guard (texte déjà rendu).
+REFUSAL=""
+
+# new_action GENRE [ARGS…] : affiche l'action encodée.
+new_action() { print -r -- "${(j: :)${(q)@}}"; }
+
+# deletion_guard CHEMIN : 0 si le script peut supprimer CHEMIN ou ce qu'il
+# contient. Sinon 1, avec la raison dans REFUSAL (et sur la sortie d'erreur).
+# Refusés : chemin vide, relatif ou non canonique (., .., //, / final), lien
+# symbolique, racine, ~ lui-même, et tout chemin qui, liens résolus, n'est ni
+# sous ~ ni dans DELETE_ALLOWED_OUTSIDE_HOME.
+deletion_guard() {
+  local p="$1" why="" home="${HOME:A}" real root
+  REFUSAL=""
+  if [[ -z "$p" ]]; then why=guard.empty
+  elif [[ "$p" != /* ]]; then why=guard.relative
+  elif [[ "$p" != "${p:a}" ]]; then why=guard.not_canonical
+  elif [[ -L "$p" ]]; then why=guard.symlink
+  else
+    real="${p:A}"
+    if [[ "$real" == / || "$real" == "$home" || "$home" == / ]]; then why=guard.root_or_home
+    elif [[ "$real" != "$home"/* ]]; then
+      why=guard.outside
+      for root in "${DELETE_ALLOWED_OUTSIDE_HOME[@]}"; do
+        [[ "$real" == "${root:A}" || "$real" == "${root:A}"/* ]] && { why=""; break; }
+      done
+    fi
+  fi
+  [[ -z "$why" ]] && return 0
+  REFUSAL="$(m exec.path_refused "${p:-\"\"}" "$(m $why)")"
+  print -u2 -r -- "$REFUSAL"
+  return 1
+}
+
+# action_do describe|run ACTION
+#   describe : affiche la description de l'action (plan).
+#   run      : l'exécute. 0 si réussie, 2 si refusée par la garde (raison dans
+#              REFUSAL), autre code en cas d'échec.
+action_do() {
+  local mode="$1" a="$2"
+  local -a w; w=("${(@Q)${(z)a}}")
+  local kind="${w[1]-}" p="${w[2]-}" days="${w[3]-}"
+  local -a tool; tool=("${(@)w[2,-1]}")
+  case "$kind" in
+    none)
+      return 0 ;;
+    rm-contents)
+      [[ "$mode" == describe ]] && { print -r -- "$(m action.rm_contents "${p/#$HOME/~}")"; return 0; }
+      deletion_guard "$p" || return 2
+      [[ -d "$p" ]] || return 0
+      find "$p" -mindepth 1 -maxdepth 1 -exec rm -rf {} + ;;
+    rm-path)
+      [[ "$mode" == describe ]] && { print -r -- "$(m action.rm_path "${p/#$HOME/~}")"; return 0; }
+      deletion_guard "$p" || return 2
+      [[ -e "$p" ]] || return 0
+      rm -rf -- "$p" ;;
+    rm-old-files)
+      [[ "$mode" == describe ]] && { print -r -- "$(m action.rm_old_files "$days" "${p/#$HOME/~}")"; return 0; }
+      deletion_guard "$p" || return 2
+      [[ "$days" == <-> ]] || { REFUSAL="$(m exec.unknown_action "$a")"; print -u2 -r -- "$REFUSAL"; return 2; }
+      [[ -d "$p" ]] || return 0
+      find "$p" -type f -mtime +"$days" -delete
+      find "$p" -mindepth 1 -type d -empty -delete ;;
+    cmd|sudo)
+      # Description : la commande telle qu'on la taperait (mots protégés si besoin).
+      if [[ "$mode" == describe ]]; then
+        [[ "$kind" == sudo ]] && tool=(sudo "${tool[@]}")
+        print -r -- "${(j: :)${(@q-)tool}}"; return 0
+      fi
+      (( ${#tool} )) || { REFUSAL="$(m exec.unknown_action "$a")"; print -u2 -r -- "$REFUSAL"; return 2; }
+      # Une seule voie pour les deux : sudo n'est qu'un préfixe de la liste.
+      [[ "$kind" == sudo ]] && tool=(sudo -- "${tool[@]}")
+      "${tool[@]}" ;;
+    *)
+      [[ "$mode" == describe ]] && { print -r -- "$a"; return 0; }
+      REFUSAL="$(m exec.unknown_action "$a")"; print -u2 -r -- "$REFUSAL"
+      return 2 ;;
+  esac
+}
+
+describe_action() { action_do describe "$1"; }   # describe_action ACTION
+run_action()      { action_do run "$1"; }        # run_action ACTION
+
+# ----------------------------------------------------------------------------
 # En-tête
 # ----------------------------------------------------------------------------
 audit_disk() {
@@ -992,7 +1119,7 @@ audit_spotlight() {
     for f in "${SPOT_FINDINGS[@]}"; do info "  – $f"; done
     add_candidate spotlight "$(m spotlight.rebuild.label)" "$SPOT_IDX" "$SPOT_IDX_KB" "-" \
       caution "$(m spotlight.rebuild.reason)" \
-      "sudo:mdutil -E /"
+      "$(new_action sudo mdutil -E /)"
   fi
 }
 
@@ -1013,7 +1140,7 @@ scan_cache_dir() {  # scan_cache_dir CATEGORIE RACINE  (chaque sous-dossier devi
       CloudKit*|com.apple.bird*) forced="$(m caches.icloud.reason)" ;;
     esac
     IFS='|' read -r v reason <<< "$(verdict_for "$d" "$CACHE_DAYS" "$forced")"
-    add_candidate "$cat" "${d:t}" "$d" "$kb" "$age" "$v" "$reason" "rm-contents:$d"
+    add_candidate "$cat" "${d:t}" "$d" "$kb" "$age" "$v" "$reason" "$(new_action rm-contents "$d")"
   done
 }
 
@@ -1024,12 +1151,12 @@ audit_caches() {
   info "~/.cache…";           scan_cache_dir cache_cli "$HOME/.cache"
 
   # Journaux
-  for logroot in "$HOME/Library/Logs" "/Library/Logs/DiagnosticReports" "$HOME/Library/Logs/DiagnosticReports"; do
+  for logroot in "$HOME/Library/Logs" "$SYSTEM_LOGS_DIR" "$HOME/Library/Logs/DiagnosticReports"; do
     [[ -d "$logroot" ]] || continue
     kb=$(find "$logroot" -type f -mtime +"$CACHE_DAYS" -print0 2>/dev/null | xargs -0 du -sk 2>/dev/null | awk '{s+=$1} END {print s+0}')
     (( kb < 5120 )) && continue
     add_candidate logs "$(m logs.label "${logroot/#$HOME/~}" "$CACHE_DAYS")" "$logroot" "$kb" "$CACHE_DAYS+" \
-      safe "$(m logs.reason)" "rm-old-files:$logroot:$CACHE_DAYS"
+      safe "$(m logs.reason)" "$(new_action rm-old-files "$logroot" "$CACHE_DAYS")"
   done
 
   # Outils développeur
@@ -1038,11 +1165,11 @@ audit_caches() {
   if [[ -d "$XC/DerivedData" ]]; then
     kb=$(du_kb "$XC/DerivedData"); forced=""; is_running Xcode && forced="$(m xcode.open.reason)"
     IFS='|' read -r v reason <<< "$(verdict_for "$XC/DerivedData" "$CACHE_DAYS" "$forced")"
-    (( kb > 0 )) && add_candidate xcode "$(m xcode.derived.label)" "$XC/DerivedData" "$kb" "$(newest_age_days "$XC/DerivedData")" "$v" "$reason" "rm-contents:$XC/DerivedData"
+    (( kb > 0 )) && add_candidate xcode "$(m xcode.derived.label)" "$XC/DerivedData" "$kb" "$(newest_age_days "$XC/DerivedData")" "$v" "$reason" "$(new_action rm-contents "$XC/DerivedData")"
   fi
   for ds in "$XC"/*DeviceSupport(N); do
     kb=$(du_kb "$ds"); (( kb > 0 )) && add_candidate xcode "$(m xcode.devicesupport.label "${ds:t}")" "$ds" "$kb" "$(newest_age_days "$ds")" \
-      safe "$(m xcode.devicesupport.reason)" "rm-contents:$ds"
+      safe "$(m xcode.devicesupport.reason)" "$(new_action rm-contents "$ds")"
   done
   [[ -d "$XC/Archives" ]] && { kb=$(du_kb "$XC/Archives"); (( kb > 0 )) && add_candidate xcode "$(m xcode.archives.label)" "$XC/Archives" "$kb" "$(newest_age_days "$XC/Archives")" \
       manual "$(m xcode.archives.reason)" "none"; }
@@ -1050,12 +1177,16 @@ audit_caches() {
   if [[ -d "$CS/Caches" ]]; then
     kb=$(du_kb "$CS/Caches")
     IFS='|' read -r v reason <<< "$(verdict_for "$CS/Caches" "$CACHE_DAYS")"
-    (( kb > 0 )) && add_candidate simulator "CoreSimulator/Caches" "$CS/Caches" "$kb" "$(newest_age_days "$CS/Caches")" "$v" "$reason" "rm-contents:$CS/Caches"
+    (( kb > 0 )) && add_candidate simulator "CoreSimulator/Caches" "$CS/Caches" "$kb" "$(newest_age_days "$CS/Caches")" "$v" "$reason" "$(new_action rm-contents "$CS/Caches")"
   fi
   if [[ -d "$CS/Devices" ]] && have xcrun; then
-    kb=$(du_kb "$CS/Devices")
+    # Taille = celle des seuls simulateurs que « delete unavailable » retire.
+    kb=0
+    for u in ${(f)"$(xcrun simctl list devices unavailable 2>/dev/null | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}' | sort -u)"}; do
+      (( kb += $(du_kb "$CS/Devices/$u") ))
+    done
     (( kb > 0 )) && add_candidate simulator "$(m sim.unavailable.label)" "$CS/Devices" "$kb" "-" \
-      safe "$(m sim.unavailable.reason)" "cmd:xcrun simctl delete unavailable"
+      safe "$(m sim.unavailable.reason)" "$(new_action cmd xcrun simctl delete unavailable)"
   fi
 
   # Gestionnaires de paquets
@@ -1063,28 +1194,29 @@ audit_caches() {
   if have brew; then
     bc=$(brew --cache 2>/dev/null); kb=$(du_kb "$bc")
     (( kb > 0 )) && add_candidate homebrew "$(m homebrew.label)" "$bc" "$kb" "$(newest_age_days "$bc")" \
-      safe "$(m homebrew.reason)" "cmd:brew cleanup --prune=all -s"
+      safe "$(m homebrew.reason)" "$(new_action cmd brew cleanup --prune=all -s)"
   fi
   [[ -d "$HOME/.npm/_cacache" ]] && { kb=$(du_kb "$HOME/.npm/_cacache"); (( kb > 0 )) && add_candidate npm "$(m npm.label)" "$HOME/.npm/_cacache" "$kb" "$(newest_age_days "$HOME/.npm/_cacache")" \
-      safe "$(m reason.redownloaded)" "cmd:npm cache clean --force"; }
+      safe "$(m reason.redownloaded)" "$(new_action cmd npm cache clean --force)"; }
   if have pnpm; then
     ps_=$(pnpm store path 2>/dev/null); [[ -d "$ps_" ]] && { kb=$(du_kb "$ps_"); (( kb > 0 )) && add_candidate pnpm "$(m pnpm.label)" "$ps_" "$kb" "$(newest_age_days "$ps_")" \
-      safe "$(m pnpm.reason)" "cmd:pnpm store prune"; }
+      safe "$(m pnpm.reason)" "$(new_action cmd pnpm store prune)"; }
   fi
   if have yarn; then
     yc=$(yarn cache dir 2>/dev/null); [[ -d "$yc" ]] && { kb=$(du_kb "$yc"); (( kb > 10240 )) && add_candidate yarn "$(m yarn.label)" "$yc" "$kb" "$(newest_age_days "$yc")" \
-      safe "$(m reason.redownloaded)" "cmd:yarn cache clean"; }
+      safe "$(m reason.redownloaded)" "$(new_action cmd yarn cache clean)"; }
   fi
-  have pip3 && { pc=$(pip3 cache dir 2>/dev/null); [[ -d "$pc" && "$pc" != "$HOME/Library/Caches/pip" ]] && { kb=$(du_kb "$pc"); (( kb > 10240 )) && add_candidate pip "$(m pip.label)" "$pc" "$kb" "$(newest_age_days "$pc")" safe "$(m reason.redownloaded)" "cmd:pip3 cache purge"; }; }
-  have uv && { uc=$(uv cache dir 2>/dev/null); [[ -d "$uc" ]] && { kb=$(du_kb "$uc"); (( kb > 10240 )) && add_candidate uv "$(m uv.label)" "$uc" "$kb" "$(newest_age_days "$uc")" safe "$(m uv.reason)" "cmd:uv cache prune"; }; }
-  [[ -d "$HOME/.cargo/registry" ]] && { kb=$(du_kb "$HOME/.cargo/registry"); (( kb > 10240 )) && add_candidate cargo "$(m cargo.label)" "$HOME/.cargo/registry" "$kb" "$(newest_age_days "$HOME/.cargo/registry")" \
-      caution "$(m cargo.reason)" "rm-contents:$HOME/.cargo/registry/cache"; }
+  have pip3 && { pc=$(pip3 cache dir 2>/dev/null); [[ -d "$pc" && "$pc" != "$HOME/Library/Caches/pip" ]] && { kb=$(du_kb "$pc"); (( kb > 10240 )) && add_candidate pip "$(m pip.label)" "$pc" "$kb" "$(newest_age_days "$pc")" safe "$(m reason.redownloaded)" "$(new_action cmd pip3 cache purge)"; }; }
+  have uv && { uc=$(uv cache dir 2>/dev/null); [[ -d "$uc" ]] && { kb=$(du_kb "$uc"); (( kb > 10240 )) && add_candidate uv "$(m uv.label)" "$uc" "$kb" "$(newest_age_days "$uc")" safe "$(m uv.reason)" "$(new_action cmd uv cache prune)"; }; }
+  CR="$HOME/.cargo/registry/cache"   # seule partie vidée : la taille porte sur elle
+  [[ -d "$CR" ]] && { kb=$(du_kb "$CR"); (( kb > 10240 )) && add_candidate cargo "$(m cargo.label)" "$CR" "$kb" "$(newest_age_days "$CR")" \
+      caution "$(m cargo.reason)" "$(new_action rm-contents "$CR")"; }
   [[ -d "$HOME/go/pkg/mod" ]] && { kb=$(du_kb "$HOME/go/pkg/mod"); (( kb > 10240 )) && add_candidate go "$(m go.label)" "$HOME/go/pkg/mod" "$kb" "$(newest_age_days "$HOME/go/pkg/mod")" \
-      caution "$(m go.reason)" "cmd:go clean -modcache"; }
+      caution "$(m go.reason)" "$(new_action cmd go clean -modcache)"; }
   if [[ -d "$HOME/.gradle/caches" ]]; then
     kb=$(du_kb "$HOME/.gradle/caches")
     IFS='|' read -r v reason <<< "$(verdict_for "$HOME/.gradle/caches" "$CACHE_DAYS")"
-    (( kb > 10240 )) && add_candidate gradle "$(m gradle.label)" "$HOME/.gradle/caches" "$kb" "$(newest_age_days "$HOME/.gradle/caches")" "$v" "$reason" "rm-contents:$HOME/.gradle/caches"
+    (( kb > 10240 )) && add_candidate gradle "$(m gradle.label)" "$HOME/.gradle/caches" "$kb" "$(newest_age_days "$HOME/.gradle/caches")" "$v" "$reason" "$(new_action rm-contents "$HOME/.gradle/caches")"
   fi
 
   # Docker
@@ -1092,7 +1224,7 @@ audit_caches() {
     h2 "$(m docker.title)"
     docker system df 2>/dev/null | sed 's/^/    /'
     rec=$(docker system df --format '{{.Reclaimable}}' 2>/dev/null | head -1)
-    add_candidate docker "$(m docker.label)" "docker" "0" "-" caution "$(m docker.reason "${rec:-?}")" "cmd:docker system prune -f"
+    add_candidate docker "$(m docker.label)" "docker" "0" "-" caution "$(m docker.reason "${rec:-?}")" "$(new_action cmd docker system prune -f)"
   fi
 }
 
@@ -1155,7 +1287,7 @@ scan_model_root() {  # scan_model_root CATEGORIE RACINE  (le libellé de catégo
   for d in "$root"/*(N/); do
     kb=$(du_kb "$d"); (( kb < 51200 )) && continue   # < 50 MiB
     age=$(newest_age_days "$d")
-    add_model "$cat" "${d:t}" "$d" "$kb" "$age" 0 "$(m model.old.reason "$age" "$MODEL_DAYS")" "rm-path:$d"
+    add_model "$cat" "${d:t}" "$d" "$kb" "$age" 0 "$(m model.old.reason "$age" "$MODEL_DAYS")" "$(new_action rm-path "$d")"
   done
 }
 
@@ -1175,7 +1307,7 @@ audit_models() {
       if [[ "$n" == "About" || "$n" == "an" || "$n" == "a" ]]; then days=0; else days=$(rel_to_days "$n" "$u"); fi
       loaded=0; [[ " $LOADED " == *" $name "* ]] && loaded=1
       add_model model_ollama "$name" "ollama:$name" "$kb" "$days" "$loaded" \
-        "$(m model.ollama_old.reason "$days" "$MODEL_DAYS" "$name")" "cmd:ollama rm $name"
+        "$(m model.ollama_old.reason "$days" "$MODEL_DAYS" "$name")" "$(new_action cmd ollama rm "$name")"
     done
   fi
 
@@ -1195,19 +1327,19 @@ audit_big() {
   if (( SNAP_COUNT > 0 )); then
     tmutil listlocalsnapshots / 2>/dev/null | grep 'com.apple.TimeMachine' | while read -r s; do
       d="${s#com.apple.TimeMachine.}"; d="${d%.local}"
-      add_candidate tm_snapshot "$d" "snapshot:$d" "0" "-" caution "$(m snapshot.reason)" "cmd:tmutil deletelocalsnapshots $d"
+      add_candidate tm_snapshot "$d" "snapshot:$d" "0" "-" caution "$(m snapshot.reason)" "$(new_action cmd tmutil deletelocalsnapshots "$d")"
     done
   fi
 
   # Corbeille
   kb=$(du_kb "$HOME/.Trash")
-  (( kb > 10240 )) && add_candidate trash "~/.Trash" "$HOME/.Trash" "$kb" "$(newest_age_days "$HOME/.Trash")" caution "$(m trash.reason)" "rm-contents:$HOME/.Trash"
+  (( kb > 10240 )) && add_candidate trash "~/.Trash" "$HOME/.Trash" "$kb" "$(newest_age_days "$HOME/.Trash")" caution "$(m trash.reason)" "$(new_action rm-contents "$HOME/.Trash")"
 
   # Sauvegardes iOS, pièces jointes Mail
   MB="$HOME/Library/Application Support/MobileSync/Backup"
   [[ -d "$MB" ]] && { kb=$(du_kb "$MB"); (( kb > 10240 )) && add_candidate ios_backups "MobileSync/Backup" "$MB" "$kb" "$(newest_age_days "$MB")" manual "$(m ios_backups.reason)" "none"; }
   MD="$HOME/Library/Containers/com.apple.mail/Data/Library/Mail Downloads"
-  [[ -d "$MD" ]] && { kb=$(du_kb "$MD"); (( kb > 10240 )) && add_candidate mail "$(m mail.label)" "$MD" "$kb" "$(newest_age_days "$MD")" safe "$(m mail.reason)" "rm-contents:$MD"; }
+  [[ -d "$MD" ]] && { kb=$(du_kb "$MD"); (( kb > 10240 )) && add_candidate mail "$(m mail.label)" "$MD" "$kb" "$(newest_age_days "$MD")" safe "$(m mail.reason)" "$(new_action rm-contents "$MD")"; }
 
   # node_modules / .venv / target de projets inactifs
   h2 "$(m deps.title)"
@@ -1218,7 +1350,7 @@ audit_big() {
     kb=$(du_kb "$d"); (( kb < 51200 )) && continue
     age=$(newest_age_days "$proj")
     (( age < ACTIVE_DAYS )) && continue
-    add_candidate inactive_project "${proj/#$HOME/~}/${d:t}" "$d" "$kb" "$age" caution "$(m deps.reason "$age")" "rm-path:$d"
+    add_candidate inactive_project "${proj/#$HOME/~}/${d:t}" "$d" "$kb" "$age" caution "$(m deps.reason "$age")" "$(new_action rm-path "$d")"
   done
 
   # Téléchargements : gros fichiers anciens (liste seulement)
@@ -1254,18 +1386,6 @@ audit_big() {
 # ----------------------------------------------------------------------------
 # 6. Plan de nettoyage
 # ----------------------------------------------------------------------------
-describe_action() {
-  local kind="${1%%:*}" arg="${1#*:}"
-  case "$kind" in
-    rm-contents)  print -- "$(m action.rm_contents "${arg/#$HOME/~}")" ;;
-    rm-path)      print -- "$(m action.rm_path "${arg/#$HOME/~}")" ;;
-    rm-old-files) print -- "$(m action.rm_old_files "${arg##*:}" "${${arg%:*}/#$HOME/~}")" ;;
-    cmd)          print -- "$arg" ;;
-    sudo)         print -- "sudo $arg" ;;
-    *)            print -- "$1" ;;
-  esac
-}
-
 print_group() {  # print_group VERDICT TITRE
   local want="$1" title="$2" i shown=0
   for i in "${ORDER[@]}"; do
@@ -1305,23 +1425,6 @@ show_plan() {
 # ----------------------------------------------------------------------------
 # 7. Exécution
 # ----------------------------------------------------------------------------
-run_action() {  # run_action ACTION  -> exécute, 0 si ok
-  local a="$1" kind="${1%%:*}" arg="${1#*:}" p days
-  case "$kind" in
-    rm-contents) p="$arg"; [[ -d "$p" && "$p" == "$HOME"/* ]] || { bad "$(m exec.path_refused "$p")"; return 1; }
-                 find "$p" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null ;;
-    rm-path)     p="$arg"; [[ -e "$p" && "$p" == "$HOME"/* && "$p" != "$HOME" ]] || { bad "$(m exec.path_refused "$p")"; return 1; }
-                 rm -rf "$p" ;;
-    rm-old-files) p="${arg%:*}"; days="${arg##*:}"
-                 find "$p" -type f -mtime +"$days" -delete 2>/dev/null
-                 find "$p" -mindepth 1 -type d -empty -delete 2>/dev/null ;;
-    cmd)         eval "$arg" ;;
-    sudo)        sudo $=arg ;;
-    none)        return 0 ;;
-    *)           bad "$(m exec.unknown_action "$a")"; return 1 ;;
-  esac
-}
-
 ask() {  # ask "question" -> 0 si la réponse figure dans answer.confirm_yes
   local r
   print -n -- "$1 "
@@ -1340,7 +1443,12 @@ execute_plan() {
       for i in "${ORDER[@]}"; do
         [[ "${CAND_VERDICT[$i]}" == safe && "${CAND_ACTION[$i]}" != "none" ]] || continue
         print -n -- "  ${CAND_LABEL[$i]:0:60} … "
-        if run_action "${CAND_ACTION[$i]}" >> "$LOG_FILE" 2>&1; then print -- "${C_GREEN}$(m exec.ok)${C_RESET}"; (( DONE_N++ )); else print -- "${C_RED}$(m exec.failed)${C_RESET}"; fi
+        run_action "${CAND_ACTION[$i]}" >> "$LOG_FILE" 2>&1
+        case $? in
+          0) print -- "${C_GREEN}$(m exec.ok)${C_RESET}"; (( DONE_N++ )) ;;
+          2) print -r -- "${C_RED}${REFUSAL}${C_RESET}" ;;
+          *) print -- "${C_RED}$(m exec.failed)${C_RESET}" ;;
+        esac
       done
     else
       info "$(m exec.safe_skipped)"
@@ -1357,7 +1465,12 @@ execute_plan() {
       if answer_in answer.item_quit "$r"; then
         break
       elif answer_in answer.item_yes "$r"; then
-        if run_action "${CAND_ACTION[$i]}" >> "$LOG_FILE" 2>&1; then ok "$(m exec.done)"; (( DONE_N++ )); else bad "$(m exec.failed)"; fi
+        run_action "${CAND_ACTION[$i]}" >> "$LOG_FILE" 2>&1
+        case $? in
+          0) ok "$(m exec.done)"; (( DONE_N++ )) ;;
+          2) bad "$REFUSAL" ;;
+          *) bad "$(m exec.failed)" ;;
+        esac
       else
         info "$(m exec.skipped)"
       fi
