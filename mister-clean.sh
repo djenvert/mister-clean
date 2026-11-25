@@ -1128,6 +1128,53 @@ audit_spotlight() {
 }
 
 # ----------------------------------------------------------------------------
+# Sondes enregistrées
+# ----------------------------------------------------------------------------
+# Une section (logs, dev, pkg, models, big, appdata…) rassemble les lignes du
+# catalogue SOURCES qui portent son nom et les sondes sur mesure inscrites ici.
+# Une sonde sur mesure sert quand l'emplacement ne suffit pas à décrire la
+# source : l'outil liste lui-même ses objets (ollama list, docker system df,
+# tmutil), ou il faut une recherche (dépendances de projets inactifs).
+#
+# PROBES : entrées « section:fonction », lancées dans cet ordre par
+# run_section. La fonction réservée « catalogue » désigne les lignes SOURCES
+# de la section ; si une section n'en mentionne pas, elles passent en premier.
+# L'ordre compte : c'est celui des candidats dans le plan.
+#
+# Contrat d'une sonde (fonction probe_<nom>, sans argument) :
+#   - elle ne propose ses candidats que par add_candidate ou add_model
+#     (le filet de sécurité s'applique ainsi à elle aussi) ;
+#   - ses actions sont construites par new_action (voir Actions de nettoyage) ;
+#   - elle ne supprime rien, ne lance aucune commande qui modifie le disque ;
+#   - elle n'affiche que par h2 / info (et des listes indentées informatives) ;
+#   - si l'outil dont elle dépend est absent, elle ne fait rien et rend 0 ;
+#   - ses variables sont locales.
+typeset -ga PROBES
+PROBES=(
+  caches:probe_app_caches
+  caches:probe_cli_caches
+  pkg:catalogue
+  pkg:probe_docker
+  models:probe_ollama
+  models:catalogue
+  big:probe_snapshots
+  big:catalogue
+  big:probe_inactive_deps
+  big:probe_downloads
+)
+
+# run_section SECTION : lance les lignes du catalogue et les sondes de SECTION.
+run_section() {
+  local sec="$1" e
+  local -a mine
+  for e in "${PROBES[@]}"; do [[ "${e%%:*}" == "$sec" ]] && mine+=("${e#*:}"); done
+  (( ${mine[(Ie)catalogue]} )) || mine=(catalogue "${mine[@]}")
+  for e in "${mine[@]}"; do
+    if [[ "$e" == catalogue ]]; then probe_sources "$sec"; else "$e"; fi
+  done
+}
+
+# ----------------------------------------------------------------------------
 # 3. Caches
 # ----------------------------------------------------------------------------
 # ----------------------------------------------------------------------------
@@ -1304,27 +1351,27 @@ scan_cache_dir() {  # scan_cache_dir CATEGORIE RACINE  (chaque sous-dossier devi
   done
 }
 
+probe_app_caches() { info "~/Library/Caches…"; scan_cache_dir cache_app "$HOME/Library/Caches"; }
+probe_cli_caches() { info "~/.cache…"; scan_cache_dir cache_cli "$HOME/.cache"; }
+
+# Docker : pas d'emplacement à mesurer, l'outil annonce lui-même ce qu'il récupère.
+probe_docker() {
+  have docker && docker info >/dev/null 2>&1 || return 0
+  local rec
+  h2 "$(m docker.title)"
+  docker system df 2>/dev/null | sed 's/^/    /'
+  rec=$(docker system df --format '{{.Reclaimable}}' 2>/dev/null | head -1)
+  add_candidate docker "$(m docker.label)" "docker" "0" "-" caution "$(m docker.reason "${rec:-?}")" "$(new_action cmd docker system prune -f)"
+}
+
 audit_caches() {
   h1 "$(m caches.title)"
-
-  info "~/Library/Caches…";   scan_cache_dir cache_app "$HOME/Library/Caches"
-  info "~/.cache…";           scan_cache_dir cache_cli "$HOME/.cache"
-
-  probe_sources logs
-
+  run_section caches
+  run_section logs
   h2 "$(m dev.title)"
-  probe_sources dev
-
+  run_section dev
   h2 "$(m pkg.title)"
-  probe_sources pkg
-
-  # Docker : pas d'emplacement à mesurer, l'outil annonce lui-même ce qu'il récupère.
-  if have docker && docker info >/dev/null 2>&1; then
-    h2 "$(m docker.title)"
-    docker system df 2>/dev/null | sed 's/^/    /'
-    rec=$(docker system df --format '{{.Reclaimable}}' 2>/dev/null | head -1)
-    add_candidate docker "$(m docker.label)" "docker" "0" "-" caution "$(m docker.reason "${rec:-?}")" "$(new_action cmd docker system prune -f)"
-  fi
+  run_section pkg
 }
 
 # ----------------------------------------------------------------------------
@@ -1383,46 +1430,47 @@ is_model_area() {
   return 1
 }
 
+# Ollama : l'outil liste lui-même ses modèles, leur âge et ceux qui sont chargés.
+probe_ollama() {
+  local LOADED OLL_KB name id sz unit n u rest kb days loaded
+  have ollama || return 0
+  h2 "$(m ollama.title)"
+  LOADED=$(ollama ps 2>/dev/null | awk 'NR>1 {print $1}' | tr '\n' ' ')
+  OLL_KB=$(du_kb "$HOME/.ollama/models")
+  info "$(m ollama.store "$(human $OLL_KB)" "${LOADED:-$(m ollama.none_loaded)}")"
+  info "$(m ollama.age_note)"
+  ollama list 2>/dev/null | awk 'NR>1' | while read -r name id sz unit n u rest; do
+    [[ -z "$name" ]] && continue
+    case "$unit" in GB) kb=$(( sz * 1048576 )) ;; MB) kb=$(( sz * 1024 )) ;; *) kb=0 ;; esac
+    kb=${kb%.*}
+    if [[ "$n" == "About" || "$n" == "an" || "$n" == "a" ]]; then days=0; else days=$(rel_to_days "$n" "$u"); fi
+    loaded=0; [[ " $LOADED " == *" $name "* ]] && loaded=1
+    add_model model_ollama "$name" "ollama:$name" "$kb" "$days" "$loaded" \
+      "$(m model.ollama_old.reason "$days" "$MODEL_DAYS" "$name")" "$(new_action cmd ollama rm "$name")"
+  done
+}
+
 audit_models() {
   h1 "$(m models.title)"
-
-  if have ollama; then
-    h2 "$(m ollama.title)"
-    LOADED=$(ollama ps 2>/dev/null | awk 'NR>1 {print $1}' | tr '\n' ' ')
-    OLL_KB=$(du_kb "$HOME/.ollama/models")
-    info "$(m ollama.store "$(human $OLL_KB)" "${LOADED:-$(m ollama.none_loaded)}")"
-    info "$(m ollama.age_note)"
-    ollama list 2>/dev/null | awk 'NR>1' | while read -r name id sz unit n u rest; do
-      [[ -z "$name" ]] && continue
-      case "$unit" in GB) kb=$(( sz * 1048576 )) ;; MB) kb=$(( sz * 1024 )) ;; *) kb=0 ;; esac
-      kb=${kb%.*}
-      if [[ "$n" == "About" || "$n" == "an" || "$n" == "a" ]]; then days=0; else days=$(rel_to_days "$n" "$u"); fi
-      loaded=0; [[ " $LOADED " == *" $name "* ]] && loaded=1
-      add_model model_ollama "$name" "ollama:$name" "$kb" "$days" "$loaded" \
-        "$(m model.ollama_old.reason "$days" "$MODEL_DAYS" "$name")" "$(new_action cmd ollama rm "$name")"
-    done
-  fi
-
-  probe_sources models
+  run_section models
 }
 
 # ----------------------------------------------------------------------------
 # 5. Gros volumes divers
 # ----------------------------------------------------------------------------
-audit_big() {
-  h1 "$(m big.title)"
+# Snapshots Time Machine locaux (comptés par audit_disk).
+probe_snapshots() {
+  (( SNAP_COUNT > 0 )) || return 0
+  local s d
+  tmutil listlocalsnapshots / 2>/dev/null | grep 'com.apple.TimeMachine' | while read -r s; do
+    d="${s#com.apple.TimeMachine.}"; d="${d%.local}"
+    add_candidate tm_snapshot "$d" "snapshot:$d" "0" "-" caution "$(m snapshot.reason)" "$(new_action cmd tmutil deletelocalsnapshots "$d")"
+  done
+}
 
-  # Snapshots Time Machine locaux
-  if (( SNAP_COUNT > 0 )); then
-    tmutil listlocalsnapshots / 2>/dev/null | grep 'com.apple.TimeMachine' | while read -r s; do
-      d="${s#com.apple.TimeMachine.}"; d="${d%.local}"
-      add_candidate tm_snapshot "$d" "snapshot:$d" "0" "-" caution "$(m snapshot.reason)" "$(new_action cmd tmutil deletelocalsnapshots "$d")"
-    done
-  fi
-
-  probe_sources big
-
-  # node_modules / .venv / target de projets inactifs
+# node_modules / .venv / target de projets inactifs
+probe_inactive_deps() {
+  local d proj kb age
   h2 "$(m deps.title)"
   find "$HOME" -maxdepth 6 \( -name node_modules -o -name .venv -o -name venv -o -name target \) -type d -prune \
     -not -path "$HOME/Library/*" -not -path "$HOME/.*" 2>/dev/null | while read -r d; do
@@ -1433,8 +1481,11 @@ audit_big() {
     (( age < ACTIVE_DAYS )) && continue
     add_candidate inactive_project "${proj/#$HOME/~}/${d:t}" "$d" "$kb" "$age" caution "$(m deps.reason "$age")" "$(new_action rm-path "$d")"
   done
+}
 
-  # Téléchargements : gros fichiers anciens (liste seulement)
+# Téléchargements : gros fichiers anciens (liste, puis un seul candidat MANUEL)
+probe_downloads() {
+  local kb f
   h2 "$(m downloads.title)"
   find "$HOME/Downloads" -maxdepth 1 -type f -size +100M -mtime +90 -print0 2>/dev/null \
     | xargs -0 du -sk 2>/dev/null | sort -rn | head -"$TOP" | while read -r kb f; do
@@ -1442,6 +1493,14 @@ audit_big() {
     done
   kb=$(find "$HOME/Downloads" -maxdepth 1 -type f -size +100M -mtime +90 -print0 2>/dev/null | xargs -0 du -sk 2>/dev/null | awk '{s+=$1} END{print s+0}')
   (( kb > 0 )) && add_candidate downloads "$(m downloads.label)" "$HOME/Downloads" "$kb" "90+" manual "$(m reason.sort_by_hand)" "none"
+  return 0
+}
+
+audit_big() {
+  local kb d
+  h1 "$(m big.title)"
+
+  run_section big
 
   # Données d'applications (informatif : jamais touché, mais souvent là que ça pèse)
   h2 "$(m appdata.title "$TOP")"
@@ -1450,7 +1509,7 @@ audit_big() {
       info "$(printf '%9s' "$(human $kb)")  ${d/#$HOME/~}"
     done
 
-  probe_sources appdata
+  run_section appdata
 
   # Top dossiers du home (vue d'ensemble)
   if (( ! FAST )); then
