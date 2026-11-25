@@ -66,6 +66,28 @@ in_sandbox() {
   STATUS=$?
 }
 
+# --- Outils simulés propres à un test -----------------------------------------
+
+# fake_tool NOM [CORPS] : installe dans le bac à sable un faux outil NOM (il
+# remplace un éventuel outil simulé de tests/stubs). Chaque appel ajoute à
+# $MC_SANDBOX/argv.NOM une ligne : ses arguments, protégés comme par quoted.
+# CORPS (code zsh, builtins seulement) s'exécute ensuite, avec "$@".
+fake_tool() {
+  local f="$MC_SANDBOX/bin/$1"
+  rm -f "$f"
+  { print -r -- '#!/bin/zsh -f'
+    print -r -- 'print -r -- "${(j: :)${(@qq)@}}" >> "$MC_SANDBOX/argv.'"$1"'"'
+    print -r -- "${2-}"
+  } > "$f"
+  chmod +x "$f"
+}
+
+# argv_of NOM : appels reçus par le faux outil NOM (une ligne par appel).
+argv_of() { [[ -f "$MC_SANDBOX/argv.$1" ]] && print -r -- "$(<"$MC_SANDBOX/argv.$1")"; }
+
+# quoted ARGS… : forme attendue d'une ligne de argv_of pour ces arguments.
+quoted() { print -r -- "${(j: :)${(@qq)@}}"; }
+
 # --- Fabrication du HOME jetable ---------------------------------------------
 
 # make_file CHEMIN TAILLE_KIB [ÂGE_JOURS] : crée un fichier de contenu réel

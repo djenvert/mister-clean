@@ -221,7 +221,7 @@ EOF
     pip.label               "cache pip"
     uv.label                "cache uv"
     uv.reason               "uv cache prune ne retire que l'inutilisé"
-    cargo.label             "registry Rust (sources + crates)"
+    cargo.label             "registry Rust (crates téléchargées)"
     cargo.reason            "retéléchargé au prochain build, mais lent hors-ligne"
     go.label                "cache modules Go"
     go.reason               "retéléchargé au prochain build"
@@ -493,7 +493,7 @@ EOF
     pip.label               "pip cache"
     uv.label                "uv cache"
     uv.reason               "uv cache prune only removes unused entries"
-    cargo.label             "Rust registry (sources + crates)"
+    cargo.label             "Rust registry (downloaded crates)"
     cargo.reason            "re-downloaded on the next build, but slow when offline"
     go.label                "Go module cache"
     go.reason               "re-downloaded on the next build"
@@ -812,8 +812,11 @@ verdict_for() {
 #   rm-contents CHEMIN          vider le dossier CHEMIN
 #   rm-path CHEMIN              supprimer CHEMIN
 #   rm-old-files CHEMIN JOURS   supprimer les fichiers de plus de JOURS j sous CHEMIN
-#   cmd COMMANDE                commande d'outil (chaîne évaluée par le shell)
-#   sudo COMMANDE               commande lancée avec sudo
+#   cmd OUTIL [ARGS…]           lancer un outil (brew, ollama, tmutil…)
+#   sudo OUTIL [ARGS…]          le même, avec droits élevés (via sudo)
+#
+# Les commandes ne sont jamais évaluées par le shell : OUTIL et chaque ARG
+# sont passés tels quels, même s'ils contiennent $( ), ;, *, espaces…
 #
 # new_action construit une action ; describe_action (plan) et run_action
 # (exécution) passent tous deux par action_do, où chaque genre définit côte à
@@ -872,6 +875,7 @@ action_do() {
   local mode="$1" a="$2"
   local -a w; w=("${(@Q)${(z)a}}")
   local kind="${w[1]-}" p="${w[2]-}" days="${w[3]-}"
+  local -a tool; tool=("${(@)w[2,-1]}")
   case "$kind" in
     none)
       return 0 ;;
@@ -892,12 +896,16 @@ action_do() {
       [[ -d "$p" ]] || return 0
       find "$p" -type f -mtime +"$days" -delete
       find "$p" -mindepth 1 -type d -empty -delete ;;
-    cmd)
-      [[ "$mode" == describe ]] && { print -r -- "$p"; return 0; }
-      eval "$p" ;;
-    sudo)
-      [[ "$mode" == describe ]] && { print -r -- "sudo $p"; return 0; }
-      sudo ${=p} ;;
+    cmd|sudo)
+      # Description : la commande telle qu'on la taperait (mots protégés si besoin).
+      if [[ "$mode" == describe ]]; then
+        [[ "$kind" == sudo ]] && tool=(sudo "${tool[@]}")
+        print -r -- "${(j: :)${(@q-)tool}}"; return 0
+      fi
+      (( ${#tool} )) || { REFUSAL="$(m exec.unknown_action "$a")"; print -u2 -r -- "$REFUSAL"; return 2; }
+      # Une seule voie pour les deux : sudo n'est qu'un préfixe de la liste.
+      [[ "$kind" == sudo ]] && tool=(sudo -- "${tool[@]}")
+      "${tool[@]}" ;;
     *)
       [[ "$mode" == describe ]] && { print -r -- "$a"; return 0; }
       REFUSAL="$(m exec.unknown_action "$a")"; print -u2 -r -- "$REFUSAL"
@@ -1111,7 +1119,7 @@ audit_spotlight() {
     for f in "${SPOT_FINDINGS[@]}"; do info "  – $f"; done
     add_candidate spotlight "$(m spotlight.rebuild.label)" "$SPOT_IDX" "$SPOT_IDX_KB" "-" \
       caution "$(m spotlight.rebuild.reason)" \
-      "$(new_action sudo "mdutil -E /")"
+      "$(new_action sudo mdutil -E /)"
   fi
 }
 
@@ -1171,9 +1179,13 @@ audit_caches() {
     (( kb > 0 )) && add_candidate simulator "CoreSimulator/Caches" "$CS/Caches" "$kb" "$(newest_age_days "$CS/Caches")" "$v" "$reason" "$(new_action rm-contents "$CS/Caches")"
   fi
   if [[ -d "$CS/Devices" ]] && have xcrun; then
-    kb=$(du_kb "$CS/Devices")
+    # Taille = celle des seuls simulateurs que « delete unavailable » retire.
+    kb=0
+    for u in ${(f)"$(xcrun simctl list devices unavailable 2>/dev/null | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}' | sort -u)"}; do
+      (( kb += $(du_kb "$CS/Devices/$u") ))
+    done
     (( kb > 0 )) && add_candidate simulator "$(m sim.unavailable.label)" "$CS/Devices" "$kb" "-" \
-      safe "$(m sim.unavailable.reason)" "$(new_action cmd "xcrun simctl delete unavailable")"
+      safe "$(m sim.unavailable.reason)" "$(new_action cmd xcrun simctl delete unavailable)"
   fi
 
   # Gestionnaires de paquets
@@ -1181,24 +1193,25 @@ audit_caches() {
   if have brew; then
     bc=$(brew --cache 2>/dev/null); kb=$(du_kb "$bc")
     (( kb > 0 )) && add_candidate homebrew "$(m homebrew.label)" "$bc" "$kb" "$(newest_age_days "$bc")" \
-      safe "$(m homebrew.reason)" "$(new_action cmd "brew cleanup --prune=all -s")"
+      safe "$(m homebrew.reason)" "$(new_action cmd brew cleanup --prune=all -s)"
   fi
   [[ -d "$HOME/.npm/_cacache" ]] && { kb=$(du_kb "$HOME/.npm/_cacache"); (( kb > 0 )) && add_candidate npm "$(m npm.label)" "$HOME/.npm/_cacache" "$kb" "$(newest_age_days "$HOME/.npm/_cacache")" \
-      safe "$(m reason.redownloaded)" "$(new_action cmd "npm cache clean --force")"; }
+      safe "$(m reason.redownloaded)" "$(new_action cmd npm cache clean --force)"; }
   if have pnpm; then
     ps_=$(pnpm store path 2>/dev/null); [[ -d "$ps_" ]] && { kb=$(du_kb "$ps_"); (( kb > 0 )) && add_candidate pnpm "$(m pnpm.label)" "$ps_" "$kb" "$(newest_age_days "$ps_")" \
-      safe "$(m pnpm.reason)" "$(new_action cmd "pnpm store prune")"; }
+      safe "$(m pnpm.reason)" "$(new_action cmd pnpm store prune)"; }
   fi
   if have yarn; then
     yc=$(yarn cache dir 2>/dev/null); [[ -d "$yc" ]] && { kb=$(du_kb "$yc"); (( kb > 10240 )) && add_candidate yarn "$(m yarn.label)" "$yc" "$kb" "$(newest_age_days "$yc")" \
-      safe "$(m reason.redownloaded)" "$(new_action cmd "yarn cache clean")"; }
+      safe "$(m reason.redownloaded)" "$(new_action cmd yarn cache clean)"; }
   fi
-  have pip3 && { pc=$(pip3 cache dir 2>/dev/null); [[ -d "$pc" && "$pc" != "$HOME/Library/Caches/pip" ]] && { kb=$(du_kb "$pc"); (( kb > 10240 )) && add_candidate pip "$(m pip.label)" "$pc" "$kb" "$(newest_age_days "$pc")" safe "$(m reason.redownloaded)" "$(new_action cmd "pip3 cache purge")"; }; }
-  have uv && { uc=$(uv cache dir 2>/dev/null); [[ -d "$uc" ]] && { kb=$(du_kb "$uc"); (( kb > 10240 )) && add_candidate uv "$(m uv.label)" "$uc" "$kb" "$(newest_age_days "$uc")" safe "$(m uv.reason)" "$(new_action cmd "uv cache prune")"; }; }
-  [[ -d "$HOME/.cargo/registry" ]] && { kb=$(du_kb "$HOME/.cargo/registry"); (( kb > 10240 )) && add_candidate cargo "$(m cargo.label)" "$HOME/.cargo/registry" "$kb" "$(newest_age_days "$HOME/.cargo/registry")" \
-      caution "$(m cargo.reason)" "$(new_action rm-contents "$HOME/.cargo/registry/cache")"; }
+  have pip3 && { pc=$(pip3 cache dir 2>/dev/null); [[ -d "$pc" && "$pc" != "$HOME/Library/Caches/pip" ]] && { kb=$(du_kb "$pc"); (( kb > 10240 )) && add_candidate pip "$(m pip.label)" "$pc" "$kb" "$(newest_age_days "$pc")" safe "$(m reason.redownloaded)" "$(new_action cmd pip3 cache purge)"; }; }
+  have uv && { uc=$(uv cache dir 2>/dev/null); [[ -d "$uc" ]] && { kb=$(du_kb "$uc"); (( kb > 10240 )) && add_candidate uv "$(m uv.label)" "$uc" "$kb" "$(newest_age_days "$uc")" safe "$(m uv.reason)" "$(new_action cmd uv cache prune)"; }; }
+  CR="$HOME/.cargo/registry/cache"   # seule partie vidée : la taille porte sur elle
+  [[ -d "$CR" ]] && { kb=$(du_kb "$CR"); (( kb > 10240 )) && add_candidate cargo "$(m cargo.label)" "$CR" "$kb" "$(newest_age_days "$CR")" \
+      caution "$(m cargo.reason)" "$(new_action rm-contents "$CR")"; }
   [[ -d "$HOME/go/pkg/mod" ]] && { kb=$(du_kb "$HOME/go/pkg/mod"); (( kb > 10240 )) && add_candidate go "$(m go.label)" "$HOME/go/pkg/mod" "$kb" "$(newest_age_days "$HOME/go/pkg/mod")" \
-      caution "$(m go.reason)" "$(new_action cmd "go clean -modcache")"; }
+      caution "$(m go.reason)" "$(new_action cmd go clean -modcache)"; }
   if [[ -d "$HOME/.gradle/caches" ]]; then
     kb=$(du_kb "$HOME/.gradle/caches")
     IFS='|' read -r v reason <<< "$(verdict_for "$HOME/.gradle/caches" "$CACHE_DAYS")"
@@ -1210,7 +1223,7 @@ audit_caches() {
     h2 "$(m docker.title)"
     docker system df 2>/dev/null | sed 's/^/    /'
     rec=$(docker system df --format '{{.Reclaimable}}' 2>/dev/null | head -1)
-    add_candidate docker "$(m docker.label)" "docker" "0" "-" caution "$(m docker.reason "${rec:-?}")" "$(new_action cmd "docker system prune -f")"
+    add_candidate docker "$(m docker.label)" "docker" "0" "-" caution "$(m docker.reason "${rec:-?}")" "$(new_action cmd docker system prune -f)"
   fi
 }
 
@@ -1263,7 +1276,7 @@ audit_models() {
       else
         v=manual; reason="$(m model.recent.reason "$days")"
       fi
-      add_candidate model_ollama "$name" "ollama:$name" "$kb" "$days" "$v" "$reason" "$(new_action cmd "ollama rm $name")"
+      add_candidate model_ollama "$name" "ollama:$name" "$kb" "$days" "$v" "$reason" "$(new_action cmd ollama rm "$name")"
     done
   fi
 
@@ -1284,7 +1297,7 @@ audit_big() {
   if (( SNAP_COUNT > 0 )); then
     tmutil listlocalsnapshots / 2>/dev/null | grep 'com.apple.TimeMachine' | while read -r s; do
       d="${s#com.apple.TimeMachine.}"; d="${d%.local}"
-      add_candidate tm_snapshot "$d" "snapshot:$d" "0" "-" caution "$(m snapshot.reason)" "$(new_action cmd "tmutil deletelocalsnapshots $d")"
+      add_candidate tm_snapshot "$d" "snapshot:$d" "0" "-" caution "$(m snapshot.reason)" "$(new_action cmd tmutil deletelocalsnapshots "$d")"
     done
   fi
 
