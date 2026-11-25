@@ -75,5 +75,5 @@ test_pip_dans_son_emplacement_par_defaut_est_propose() {
 
 test_le_catalogue_est_bien_forme() {
   in_sandbox "$CATALOGUE_CHECK"
-  [[ "$OUT" == "entrées=27" ]] || fail "catalogue :"$'\n'"$OUT"
+  [[ "$OUT" == "entrées=33" ]] || fail "catalogue :"$'\n'"$OUT"
 }

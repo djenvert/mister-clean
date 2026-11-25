@@ -1,4 +1,4 @@
 #!/bin/zsh -f
 # pgrep -x NOM : vrai si NOM figure (ligne exacte) dans $MC_SANDBOX/running.
 source "${0:h}/_record"
-[[ -f "$MC_SANDBOX/running" ]] && grep -qxF -- "${@[-1]}" "$MC_SANDBOX/running"
+[[ -f "$MC_SANDBOX/running" ]] && grep -qxF -- "${${@[-1]}//\\/}" "$MC_SANDBOX/running"
