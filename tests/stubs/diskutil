@@ -1,0 +1,3 @@
+#!/bin/zsh -f
+# Aucune information d'espace purgeable.
+source "${0:h}/_record"

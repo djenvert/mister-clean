@@ -1,0 +1,10 @@
+#!/bin/zsh -f
+# Fichiers ouverts simulés, au format de « lsof -F n » (une ligne « n<chemin> ») :
+#   $MC_SANDBOX/open_files : chemins listés pour « lsof -u … -F n »
+#   $MC_SANDBOX/cwds       : répertoires listés pour « lsof … -d cwd -F n »
+# Un chemin par ligne ; fichiers absents = aucun fichier ouvert.
+source "${0:h}/_record"
+src="$MC_SANDBOX/open_files"
+(( ${@[(Ie)cwd]} )) && src="$MC_SANDBOX/cwds"
+[[ -f "$src" ]] && sed 's/^/n/' "$src"
+exit 0

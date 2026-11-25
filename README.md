@@ -41,3 +41,31 @@ confirmation word is `yes`.
 ./mister-clean.sh --lang en --dry-run
 ./mister-clean.sh --lang en
 ```
+
+## Tests
+
+```sh
+./tests/run.zsh                          # toute la suite
+./tests/run.zsh tests/test_harnais.zsh   # un seul fichier
+```
+
+Les tests ne touchent jamais au vrai disque. Chaque test tourne dans son
+propre processus, avec un bac à sable neuf (voir `tests/lib.zsh`) :
+
+- un `HOME` jetable, créé dans le répertoire temporaire puis supprimé ;
+- un `PATH` réduit à une liste d'outils système autorisés et aux outils
+  simulés de `tests/stubs/` (`df`, `diskutil`, `tmutil`, `lsof`, `pgrep`…).
+  Les outils absents (brew, docker, ollama…) le sont aussi pour le script ;
+- `sudo`, `mdutil`, `mdfind` et `log` sont simulés : ils échouent sans rien
+  faire et chaque appel est noté. Les tests passent `--skip-spotlight` et
+  vérifient qu'aucun n'a été appelé. Ni sudo ni l'Accès complet au disque ne
+  sont nécessaires.
+
+Le script peut être chargé sans rien lancer : `source mister-clean.sh` définit
+ses fonctions et ses réglages par défaut ; l'audit ne démarre que lorsque le
+script est exécuté. Un test peut ainsi soit lancer le script entier
+(`run_script --dry-run …`), soit appeler ses fonctions (`in_sandbox '…'`).
+
+Pour écrire un test : ajouter une fonction `test_…` dans un fichier
+`tests/test_*.zsh`, construire le `HOME` avec `make_file` et `age_path`, puis
+vérifier avec les `assert_*` de `tests/lib.zsh`.

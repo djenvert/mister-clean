@@ -13,7 +13,9 @@
 # cache_app, xcode…).
 # =============================================================================
 
-emulate -L zsh
+# Options du shell posées sans « -L » : quand le script est chargé (source)
+# par la suite de tests, elles restent en vigueur pour les fonctions appelées.
+emulate zsh
 setopt null_glob pipe_fail no_nomatch
 set -u
 
@@ -597,17 +599,9 @@ lang_from_env() {
   esac
 }
 
+# Catalogue par défaut dès le chargement ; parse_args le remplace si --lang
+# en demande un autre.
 UI_LANG="$(lang_from_env)"
-() {  # pré-lecture de --lang (la dernière occurrence l'emporte)
-  local i
-  for (( i = 1; i <= $#; i++ )); do
-    [[ "${argv[i]}" == --lang ]] || continue
-    case "${argv[i+1]-}" in
-      fr|en) UI_LANG="${argv[i+1]}"; (( i++ )) ;;
-      *) messages_$UI_LANG; print -u2 -- "$(m err.bad_lang "${argv[i+1]-}")"; exit 2 ;;
-    esac
-  done
-} "$@"
 messages_$UI_LANG
 
 # ----------------------------------------------------------------------------
@@ -624,46 +618,63 @@ SKIP_SPOTLIGHT=0
 
 usage() { print -r -- "${MSG[help]}"; exit 0; }
 
-while (( $# > 0 )); do
-  case "$1" in
-    --dry-run)        DRY_RUN=1 ;;
-    --yes|-y)         ASSUME_YES=1 ;;
-    --days)           CACHE_DAYS="$2"; shift ;;
-    --model-days)     MODEL_DAYS="$2"; shift ;;
-    --active-days)    ACTIVE_DAYS="$2"; shift ;;
-    --top)            TOP="$2"; shift ;;
-    --fast)           FAST=1 ;;
-    --skip-spotlight) SKIP_SPOTLIGHT=1 ;;
-    --lang)           shift ;;   # déjà lue et validée plus haut (section Langue)
-    -h|--help)        usage ;;
-    *) print -u2 -- "$(m err.unknown_option "$1")"; exit 2 ;;
-  esac
-  shift
-done
+# parse_args ARGS… : lit les options de la ligne de commande dans les variables
+# ci-dessus. --lang est lu en premier, pour que --help et « Option inconnue »
+# s'affichent déjà dans la bonne langue, quel que soit l'ordre (la dernière
+# occurrence l'emporte).
+parse_args() {
+  local i
+  for (( i = 1; i <= $#; i++ )); do
+    [[ "${argv[i]}" == --lang ]] || continue
+    case "${argv[i+1]-}" in
+      fr|en) UI_LANG="${argv[i+1]}"; (( i++ )) ;;
+      *) messages_$UI_LANG; print -u2 -- "$(m err.bad_lang "${argv[i+1]-}")"; exit 2 ;;
+    esac
+  done
+  messages_$UI_LANG
 
-if [[ "$(uname -s)" != "Darwin" ]]; then
-  print -u2 -- "$(m err.macos_only)"; exit 1
-fi
+  while (( $# > 0 )); do
+    case "$1" in
+      --dry-run)        DRY_RUN=1 ;;
+      --yes|-y)         ASSUME_YES=1 ;;
+      --days)           CACHE_DAYS="$2"; shift ;;
+      --model-days)     MODEL_DAYS="$2"; shift ;;
+      --active-days)    ACTIVE_DAYS="$2"; shift ;;
+      --top)            TOP="$2"; shift ;;
+      --fast)           FAST=1 ;;
+      --skip-spotlight) SKIP_SPOTLIGHT=1 ;;
+      --lang)           shift ;;   # déjà lue et validée plus haut
+      -h|--help)        usage ;;
+      *) print -u2 -- "$(m err.unknown_option "$1")"; exit 2 ;;
+    esac
+    shift
+  done
+}
 
 # ----------------------------------------------------------------------------
 # Sortie, journal, couleurs
 # ----------------------------------------------------------------------------
-LOG_DIR="$HOME/Library/Logs/mister-clean"
-mkdir -p "$LOG_DIR"
-RUN_ID="$(date +%Y%m%d-%H%M%S)"
-LOG_FILE="$LOG_DIR/run-$RUN_ID.log"
-TMP="$(mktemp -d -t mister-clean)"
-trap 'rm -rf "$TMP"' EXIT
+# Sans terminal (et tant que setup_output n'a pas tourné) : pas de couleurs.
+C_RESET=""; C_BOLD=""; C_DIM=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_CYAN=""
 
-if [[ -t 1 ]]; then
-  C_RESET=$'\e[0m'; C_BOLD=$'\e[1m'; C_DIM=$'\e[2m'
-  C_RED=$'\e[31m'; C_GREEN=$'\e[32m'; C_YELLOW=$'\e[33m'; C_BLUE=$'\e[34m'; C_CYAN=$'\e[36m'
-else
-  C_RESET=""; C_BOLD=""; C_DIM=""; C_RED=""; C_GREEN=""; C_YELLOW=""; C_BLUE=""; C_CYAN=""
-fi
+# setup_output : journal, répertoire temporaire, couleurs si terminal, et
+# duplication de toute la sortie vers le journal.
+setup_output() {
+  LOG_DIR="$HOME/Library/Logs/mister-clean"
+  mkdir -p "$LOG_DIR"
+  RUN_ID="$(date +%Y%m%d-%H%M%S)"
+  LOG_FILE="$LOG_DIR/run-$RUN_ID.log"
+  # Modèle explicite plutôt que « mktemp -t », qui ignore TMPDIR sur macOS.
+  TMP="$(mktemp -d "${${TMPDIR:-/tmp}%/}/mister-clean.XXXXXXXXXX")"   # supprimé à la sortie (trap posé avant main)
 
-# Tout ce qui est affiché est aussi journalisé (sans les codes couleur).
-exec > >(tee >(sed 's/\x1b\[[0-9;]*m//g' >> "$LOG_FILE")) 2>&1
+  if [[ -t 1 ]]; then
+    C_RESET=$'\e[0m'; C_BOLD=$'\e[1m'; C_DIM=$'\e[2m'
+    C_RED=$'\e[31m'; C_GREEN=$'\e[32m'; C_YELLOW=$'\e[33m'; C_BLUE=$'\e[34m'; C_CYAN=$'\e[36m'
+  fi
+
+  # Tout ce qui est affiché est aussi journalisé (sans les codes couleur).
+  exec > >(tee >(sed 's/\x1b\[[0-9;]*m//g' >> "$LOG_FILE")) 2>&1
+}
 
 say()    { print -r -- "$@"; }
 h1()     { print; print -r -- "${C_BOLD}${C_BLUE}━━━ $* ━━━${C_RESET}"; }
@@ -720,8 +731,8 @@ is_running() { pgrep -x "$1" >/dev/null 2>&1; }
 # CAND_CAT    : clé de catégorie (libellé : MSG[cat.<clé>])
 # CAND_VERDICT: safe | caution | manual (libellé : MSG[verdict.<valeur>])
 # CAND_LABEL, CAND_REASON : textes déjà rendus depuis le catalogue
-typeset -a CAND_CAT CAND_LABEL CAND_PATH CAND_KB CAND_AGE CAND_VERDICT CAND_REASON CAND_ACTION
-typeset -a OPEN_FILES ACTIVE_PROJECTS
+typeset -ga CAND_CAT CAND_LABEL CAND_PATH CAND_KB CAND_AGE CAND_VERDICT CAND_REASON CAND_ACTION
+typeset -ga OPEN_FILES ACTIVE_PROJECTS
 
 # add_candidate CAT LABEL PATH KB AGE VERDICT RAISON ACTION
 add_candidate() {
@@ -761,81 +772,86 @@ verdict_for() {
 # ----------------------------------------------------------------------------
 # En-tête
 # ----------------------------------------------------------------------------
-print -r -- "$(m header.title "$VERSION" "$(date '+%Y-%m-%d %H:%M')" "$( ((DRY_RUN)) && m header.dry_run )")"
-dim "$(m header.system "$(sw_vers -productVersion)" "$(uname -m)" "$LOG_FILE")"
-dim "$(m header.thresholds "$CACHE_DAYS" "$MODEL_DAYS" "$ACTIVE_DAYS")"
+audit_disk() {
+  print -r -- "$(m header.title "$VERSION" "$(date '+%Y-%m-%d %H:%M')" "$( ((DRY_RUN)) && m header.dry_run )")"
+  dim "$(m header.system "$(sw_vers -productVersion)" "$(uname -m)" "$LOG_FILE")"
+  dim "$(m header.thresholds "$CACHE_DAYS" "$MODEL_DAYS" "$ACTIVE_DAYS")"
 
-h1 "$(m disk.title)"
-DATA_VOL="/System/Volumes/Data"
-[[ -d "$DATA_VOL" ]] || DATA_VOL="/"
-DF_LINE=$(df -k "$DATA_VOL" | tail -1)
-DISK_TOTAL_KB=$(print -- "$DF_LINE" | awk '{print $2}')
-DISK_USED_KB=$(print -- "$DF_LINE" | awk '{print $3}')
-DISK_FREE_KB=$(print -- "$DF_LINE" | awk '{print $4}')
-info "$(m disk.volume "$(human $DISK_USED_KB)" "$(human $DISK_TOTAL_KB)" "$(human $DISK_FREE_KB)")"
-PURGEABLE=$(diskutil info "$DATA_VOL" 2>/dev/null | awk -F: '/Purgeable/ {gsub(/^ +/,"",$2); print $2}' | head -1)
-[[ -n "$PURGEABLE" ]] && info "$(m disk.purgeable "$PURGEABLE")"
-SNAP_COUNT=$(tmutil listlocalsnapshots / 2>/dev/null | grep -c 'com.apple.TimeMachine')
-info "$(m disk.snapshots "$SNAP_COUNT")"
+  h1 "$(m disk.title)"
+  DATA_VOL="/System/Volumes/Data"
+  [[ -d "$DATA_VOL" ]] || DATA_VOL="/"
+  DF_LINE=$(df -k "$DATA_VOL" | tail -1)
+  DISK_TOTAL_KB=$(print -- "$DF_LINE" | awk '{print $2}')
+  DISK_USED_KB=$(print -- "$DF_LINE" | awk '{print $3}')
+  DISK_FREE_KB=$(print -- "$DF_LINE" | awk '{print $4}')
+  info "$(m disk.volume "$(human $DISK_USED_KB)" "$(human $DISK_TOTAL_KB)" "$(human $DISK_FREE_KB)")"
+  PURGEABLE=$(diskutil info "$DATA_VOL" 2>/dev/null | awk -F: '/Purgeable/ {gsub(/^ +/,"",$2); print $2}' | head -1)
+  [[ -n "$PURGEABLE" ]] && info "$(m disk.purgeable "$PURGEABLE")"
+  SNAP_COUNT=$(tmutil listlocalsnapshots / 2>/dev/null | grep -c 'com.apple.TimeMachine')
+  info "$(m disk.snapshots "$SNAP_COUNT")"
 
-# Accès complet au disque (TCC) : sans lui, ~/Documents, ~/Desktop et les résultats
-# de mdfind sont masqués à ce terminal → les contre-vérifications Spotlight seraient faussées.
-TCC_OK=1
-if ! ls "$HOME/Desktop" >/dev/null 2>&1 && [[ -d "$HOME/Desktop" ]]; then TCC_OK=0; fi
-if (( TCC_OK )); then ok "$(m disk.fda_ok)"
-else
-  warn "$(m disk.fda_missing)"
-  warn "$(m disk.fda_consequence)"
-fi
+  # Accès complet au disque (TCC) : sans lui, ~/Documents, ~/Desktop et les résultats
+  # de mdfind sont masqués à ce terminal → les contre-vérifications Spotlight seraient faussées.
+  TCC_OK=1
+  if ! ls "$HOME/Desktop" >/dev/null 2>&1 && [[ -d "$HOME/Desktop" ]]; then TCC_OK=0; fi
+  if (( TCC_OK )); then ok "$(m disk.fda_ok)"
+  else
+    warn "$(m disk.fda_missing)"
+    warn "$(m disk.fda_consequence)"
+  fi
+}
 
 # ----------------------------------------------------------------------------
 # 1. Projets en cours & fichiers ouverts  (le filet de sécurité)
 # ----------------------------------------------------------------------------
-h1 "$(m active.title)"
+audit_active() {
+  h1 "$(m active.title)"
 
-info "$(m active.scanning_git "$ACTIVE_DAYS")"
-while IFS= read -r gitdir; do
-  proj="${gitdir:h}"
-  if [[ -n "$(find "$proj" -maxdepth 4 -type f -mtime -"$ACTIVE_DAYS" \
-        -not -path '*/node_modules/*' -not -path '*/.git/*' -print -quit 2>/dev/null)" ]]; then
-    ACTIVE_PROJECTS+=("$proj")
+  info "$(m active.scanning_git "$ACTIVE_DAYS")"
+  while IFS= read -r gitdir; do
+    proj="${gitdir:h}"
+    if [[ -n "$(find "$proj" -maxdepth 4 -type f -mtime -"$ACTIVE_DAYS" \
+          -not -path '*/node_modules/*' -not -path '*/.git/*' -print -quit 2>/dev/null)" ]]; then
+      ACTIVE_PROJECTS+=("$proj")
+    fi
+  done < <(find "$HOME" -maxdepth 5 -name .git -type d \
+            -not -path "$HOME/Library/*" -not -path "$HOME/.Trash/*" \
+            -not -path '*/node_modules/*' -not -path "$HOME/.*/*" 2>/dev/null)
+
+  info "$(m active.scanning_lsof)"
+  lsof -n -u "$USER" -F n 2>/dev/null | sed -n 's/^n//p' | grep "^$HOME/" | sort -u > "$TMP/open_files" || true
+  # Répertoires de travail des shells/éditeurs = projets en cours aussi
+  lsof -n -u "$USER" -a -d cwd -F n 2>/dev/null | sed -n 's/^n//p' | grep "^$HOME/" | grep -v "^$HOME/Library" | sort -u > "$TMP/cwds" || true
+  while IFS= read -r d; do
+    [[ "$d" == "$HOME" ]] && continue
+    # on remonte au dépôt git s'il existe
+    r="$d"; while [[ "$r" != "$HOME" && "$r" != "/" && ! -d "$r/.git" ]]; do r="${r:h}"; done
+    [[ -d "$r/.git" ]] && d="$r"
+    (( ${ACTIVE_PROJECTS[(Ie)$d]} )) || ACTIVE_PROJECTS+=("$d")
+  done < "$TMP/cwds"
+
+  if (( ${#ACTIVE_PROJECTS} )); then
+    ok "$(m active.found "${#ACTIVE_PROJECTS}")"
+    for p in "${ACTIVE_PROJECTS[@]}"; do info "  ${p/#$HOME/~}"; done
+  else
+    ok "$(m active.none)"
   fi
-done < <(find "$HOME" -maxdepth 5 -name .git -type d \
-          -not -path "$HOME/Library/*" -not -path "$HOME/.Trash/*" \
-          -not -path '*/node_modules/*' -not -path "$HOME/.*/*" 2>/dev/null)
+  info "$(m active.open_files "$(wc -l < "$TMP/open_files" | tr -d ' ')")"
 
-info "$(m active.scanning_lsof)"
-lsof -n -u "$USER" -F n 2>/dev/null | sed -n 's/^n//p' | grep "^$HOME/" | sort -u > "$TMP/open_files" || true
-# Répertoires de travail des shells/éditeurs = projets en cours aussi
-lsof -n -u "$USER" -a -d cwd -F n 2>/dev/null | sed -n 's/^n//p' | grep "^$HOME/" | grep -v "^$HOME/Library" | sort -u > "$TMP/cwds" || true
-while IFS= read -r d; do
-  [[ "$d" == "$HOME" ]] && continue
-  # on remonte au dépôt git s'il existe
-  r="$d"; while [[ "$r" != "$HOME" && "$r" != "/" && ! -d "$r/.git" ]]; do r="${r:h}"; done
-  [[ -d "$r/.git" ]] && d="$r"
-  (( ${ACTIVE_PROJECTS[(Ie)$d]} )) || ACTIVE_PROJECTS+=("$d")
-done < "$TMP/cwds"
-
-if (( ${#ACTIVE_PROJECTS} )); then
-  ok "$(m active.found "${#ACTIVE_PROJECTS}")"
-  for p in "${ACTIVE_PROJECTS[@]}"; do info "  ${p/#$HOME/~}"; done
-else
-  ok "$(m active.none)"
-fi
-info "$(m active.open_files "$(wc -l < "$TMP/open_files" | tr -d ' ')")"
-
-typeset -a RUNNING_APPS
-for app in Xcode ollama "Docker" "Code" "Cursor" "Google Chrome" Safari Arc Firefox Slack Spotify "LM Studio"; do
-  is_running "$app" && RUNNING_APPS+=("$app")
-done
-(( ${#RUNNING_APPS} )) && info "$(m active.running_apps "${(j:, :)RUNNING_APPS}")"
+  typeset -a RUNNING_APPS
+  for app in Xcode ollama "Docker" "Code" "Cursor" "Google Chrome" Safari Arc Firefox Slack Spotify "LM Studio"; do
+    is_running "$app" && RUNNING_APPS+=("$app")
+  done
+  (( ${#RUNNING_APPS} )) && info "$(m active.running_apps "${(j:, :)RUNNING_APPS}")"
+}
 
 # ----------------------------------------------------------------------------
 # 2. Spotlight — contre-vérification
 # ----------------------------------------------------------------------------
 SPOT_SUSPECT=0
-typeset -a SPOT_FINDINGS
-if (( ! SKIP_SPOTLIGHT )); then
+typeset -ga SPOT_FINDINGS
+
+audit_spotlight() {
   h1 "$(m spot.title)"
 
   h2 "$(m spot.mdutil.title)"
@@ -953,13 +969,11 @@ if (( ! SKIP_SPOTLIGHT )); then
       caution "$(m spotlight.rebuild.reason)" \
       "sudo:mdutil -E /"
   fi
-fi
+}
 
 # ----------------------------------------------------------------------------
 # 3. Caches
 # ----------------------------------------------------------------------------
-h1 "$(m caches.title)"
-
 scan_cache_dir() {  # scan_cache_dir CATEGORIE RACINE  (chaque sous-dossier devient un candidat)
   local cat="$1" root="$2" d kb age v reason forced
   [[ -d "$root" ]] || return 0
@@ -977,80 +991,82 @@ scan_cache_dir() {  # scan_cache_dir CATEGORIE RACINE  (chaque sous-dossier devi
   done
 }
 
-info "~/Library/Caches…";   scan_cache_dir cache_app "$HOME/Library/Caches"
-info "~/.cache…";           scan_cache_dir cache_cli "$HOME/.cache"
+audit_caches() {
+  h1 "$(m caches.title)"
 
-# Journaux
-for logroot in "$HOME/Library/Logs" "/Library/Logs/DiagnosticReports" "$HOME/Library/Logs/DiagnosticReports"; do
-  [[ -d "$logroot" ]] || continue
-  kb=$(find "$logroot" -type f -mtime +"$CACHE_DAYS" -print0 2>/dev/null | xargs -0 du -sk 2>/dev/null | awk '{s+=$1} END {print s+0}')
-  (( kb < 5120 )) && continue
-  add_candidate logs "$(m logs.label "${logroot/#$HOME/~}" "$CACHE_DAYS")" "$logroot" "$kb" "$CACHE_DAYS+" \
-    safe "$(m logs.reason)" "rm-old-files:$logroot:$CACHE_DAYS"
-done
+  info "~/Library/Caches…";   scan_cache_dir cache_app "$HOME/Library/Caches"
+  info "~/.cache…";           scan_cache_dir cache_cli "$HOME/.cache"
 
-# Outils développeur
-h2 "$(m dev.title)"
-XC="$HOME/Library/Developer/Xcode"
-if [[ -d "$XC/DerivedData" ]]; then
-  kb=$(du_kb "$XC/DerivedData"); forced=""; is_running Xcode && forced="$(m xcode.open.reason)"
-  IFS='|' read -r v reason <<< "$(verdict_for "$XC/DerivedData" "$CACHE_DAYS" "$forced")"
-  (( kb > 0 )) && add_candidate xcode "$(m xcode.derived.label)" "$XC/DerivedData" "$kb" "$(newest_age_days "$XC/DerivedData")" "$v" "$reason" "rm-contents:$XC/DerivedData"
-fi
-for ds in "$XC"/*DeviceSupport(N); do
-  kb=$(du_kb "$ds"); (( kb > 0 )) && add_candidate xcode "$(m xcode.devicesupport.label "${ds:t}")" "$ds" "$kb" "$(newest_age_days "$ds")" \
-    safe "$(m xcode.devicesupport.reason)" "rm-contents:$ds"
-done
-[[ -d "$XC/Archives" ]] && { kb=$(du_kb "$XC/Archives"); (( kb > 0 )) && add_candidate xcode "$(m xcode.archives.label)" "$XC/Archives" "$kb" "$(newest_age_days "$XC/Archives")" \
-    manual "$(m xcode.archives.reason)" "none"; }
-CS="$HOME/Library/Developer/CoreSimulator"
-[[ -d "$CS/Caches" ]] && { kb=$(du_kb "$CS/Caches"); (( kb > 0 )) && add_candidate simulator "CoreSimulator/Caches" "$CS/Caches" "$kb" "$(newest_age_days "$CS/Caches")" \
-    "$(verdict_for "$CS/Caches" "$CACHE_DAYS" | cut -d'|' -f1)" "$(verdict_for "$CS/Caches" "$CACHE_DAYS" | cut -d'|' -f2)" "rm-contents:$CS/Caches"; }
-if [[ -d "$CS/Devices" ]] && have xcrun; then
-  kb=$(du_kb "$CS/Devices")
-  (( kb > 0 )) && add_candidate simulator "$(m sim.unavailable.label)" "$CS/Devices" "$kb" "-" \
-    safe "$(m sim.unavailable.reason)" "cmd:xcrun simctl delete unavailable"
-fi
+  # Journaux
+  for logroot in "$HOME/Library/Logs" "/Library/Logs/DiagnosticReports" "$HOME/Library/Logs/DiagnosticReports"; do
+    [[ -d "$logroot" ]] || continue
+    kb=$(find "$logroot" -type f -mtime +"$CACHE_DAYS" -print0 2>/dev/null | xargs -0 du -sk 2>/dev/null | awk '{s+=$1} END {print s+0}')
+    (( kb < 5120 )) && continue
+    add_candidate logs "$(m logs.label "${logroot/#$HOME/~}" "$CACHE_DAYS")" "$logroot" "$kb" "$CACHE_DAYS+" \
+      safe "$(m logs.reason)" "rm-old-files:$logroot:$CACHE_DAYS"
+  done
 
-# Gestionnaires de paquets
-h2 "$(m pkg.title)"
-if have brew; then
-  bc=$(brew --cache 2>/dev/null); kb=$(du_kb "$bc")
-  (( kb > 0 )) && add_candidate homebrew "$(m homebrew.label)" "$bc" "$kb" "$(newest_age_days "$bc")" \
-    safe "$(m homebrew.reason)" "cmd:brew cleanup --prune=all -s"
-fi
-[[ -d "$HOME/.npm/_cacache" ]] && { kb=$(du_kb "$HOME/.npm/_cacache"); (( kb > 0 )) && add_candidate npm "$(m npm.label)" "$HOME/.npm/_cacache" "$kb" "$(newest_age_days "$HOME/.npm/_cacache")" \
-    safe "$(m reason.redownloaded)" "cmd:npm cache clean --force"; }
-if have pnpm; then
-  ps_=$(pnpm store path 2>/dev/null); [[ -d "$ps_" ]] && { kb=$(du_kb "$ps_"); (( kb > 0 )) && add_candidate pnpm "$(m pnpm.label)" "$ps_" "$kb" "$(newest_age_days "$ps_")" \
-    safe "$(m pnpm.reason)" "cmd:pnpm store prune"; }
-fi
-if have yarn; then
-  yc=$(yarn cache dir 2>/dev/null); [[ -d "$yc" ]] && { kb=$(du_kb "$yc"); (( kb > 10240 )) && add_candidate yarn "$(m yarn.label)" "$yc" "$kb" "$(newest_age_days "$yc")" \
-    safe "$(m reason.redownloaded)" "cmd:yarn cache clean"; }
-fi
-have pip3 && { pc=$(pip3 cache dir 2>/dev/null); [[ -d "$pc" && "$pc" != "$HOME/Library/Caches/pip" ]] && { kb=$(du_kb "$pc"); (( kb > 10240 )) && add_candidate pip "$(m pip.label)" "$pc" "$kb" "$(newest_age_days "$pc")" safe "$(m reason.redownloaded)" "cmd:pip3 cache purge"; }; }
-have uv && { uc=$(uv cache dir 2>/dev/null); [[ -d "$uc" ]] && { kb=$(du_kb "$uc"); (( kb > 10240 )) && add_candidate uv "$(m uv.label)" "$uc" "$kb" "$(newest_age_days "$uc")" safe "$(m uv.reason)" "cmd:uv cache prune"; }; }
-[[ -d "$HOME/.cargo/registry" ]] && { kb=$(du_kb "$HOME/.cargo/registry"); (( kb > 10240 )) && add_candidate cargo "$(m cargo.label)" "$HOME/.cargo/registry" "$kb" "$(newest_age_days "$HOME/.cargo/registry")" \
-    caution "$(m cargo.reason)" "rm-contents:$HOME/.cargo/registry/cache"; }
-[[ -d "$HOME/go/pkg/mod" ]] && { kb=$(du_kb "$HOME/go/pkg/mod"); (( kb > 10240 )) && add_candidate go "$(m go.label)" "$HOME/go/pkg/mod" "$kb" "$(newest_age_days "$HOME/go/pkg/mod")" \
-    caution "$(m go.reason)" "cmd:go clean -modcache"; }
-[[ -d "$HOME/.gradle/caches" ]] && { kb=$(du_kb "$HOME/.gradle/caches"); (( kb > 10240 )) && add_candidate gradle "$(m gradle.label)" "$HOME/.gradle/caches" "$kb" "$(newest_age_days "$HOME/.gradle/caches")" \
-    "$(verdict_for "$HOME/.gradle/caches" "$CACHE_DAYS" | cut -d'|' -f1)" "$(verdict_for "$HOME/.gradle/caches" "$CACHE_DAYS" | cut -d'|' -f2)" "rm-contents:$HOME/.gradle/caches"; }
+  # Outils développeur
+  h2 "$(m dev.title)"
+  XC="$HOME/Library/Developer/Xcode"
+  if [[ -d "$XC/DerivedData" ]]; then
+    kb=$(du_kb "$XC/DerivedData"); forced=""; is_running Xcode && forced="$(m xcode.open.reason)"
+    IFS='|' read -r v reason <<< "$(verdict_for "$XC/DerivedData" "$CACHE_DAYS" "$forced")"
+    (( kb > 0 )) && add_candidate xcode "$(m xcode.derived.label)" "$XC/DerivedData" "$kb" "$(newest_age_days "$XC/DerivedData")" "$v" "$reason" "rm-contents:$XC/DerivedData"
+  fi
+  for ds in "$XC"/*DeviceSupport(N); do
+    kb=$(du_kb "$ds"); (( kb > 0 )) && add_candidate xcode "$(m xcode.devicesupport.label "${ds:t}")" "$ds" "$kb" "$(newest_age_days "$ds")" \
+      safe "$(m xcode.devicesupport.reason)" "rm-contents:$ds"
+  done
+  [[ -d "$XC/Archives" ]] && { kb=$(du_kb "$XC/Archives"); (( kb > 0 )) && add_candidate xcode "$(m xcode.archives.label)" "$XC/Archives" "$kb" "$(newest_age_days "$XC/Archives")" \
+      manual "$(m xcode.archives.reason)" "none"; }
+  CS="$HOME/Library/Developer/CoreSimulator"
+  [[ -d "$CS/Caches" ]] && { kb=$(du_kb "$CS/Caches"); (( kb > 0 )) && add_candidate simulator "CoreSimulator/Caches" "$CS/Caches" "$kb" "$(newest_age_days "$CS/Caches")" \
+      "$(verdict_for "$CS/Caches" "$CACHE_DAYS" | cut -d'|' -f1)" "$(verdict_for "$CS/Caches" "$CACHE_DAYS" | cut -d'|' -f2)" "rm-contents:$CS/Caches"; }
+  if [[ -d "$CS/Devices" ]] && have xcrun; then
+    kb=$(du_kb "$CS/Devices")
+    (( kb > 0 )) && add_candidate simulator "$(m sim.unavailable.label)" "$CS/Devices" "$kb" "-" \
+      safe "$(m sim.unavailable.reason)" "cmd:xcrun simctl delete unavailable"
+  fi
 
-# Docker
-if have docker && docker info >/dev/null 2>&1; then
-  h2 "$(m docker.title)"
-  docker system df 2>/dev/null | sed 's/^/    /'
-  rec=$(docker system df --format '{{.Reclaimable}}' 2>/dev/null | head -1)
-  add_candidate docker "$(m docker.label)" "docker" "0" "-" caution "$(m docker.reason "${rec:-?}")" "cmd:docker system prune -f"
-fi
+  # Gestionnaires de paquets
+  h2 "$(m pkg.title)"
+  if have brew; then
+    bc=$(brew --cache 2>/dev/null); kb=$(du_kb "$bc")
+    (( kb > 0 )) && add_candidate homebrew "$(m homebrew.label)" "$bc" "$kb" "$(newest_age_days "$bc")" \
+      safe "$(m homebrew.reason)" "cmd:brew cleanup --prune=all -s"
+  fi
+  [[ -d "$HOME/.npm/_cacache" ]] && { kb=$(du_kb "$HOME/.npm/_cacache"); (( kb > 0 )) && add_candidate npm "$(m npm.label)" "$HOME/.npm/_cacache" "$kb" "$(newest_age_days "$HOME/.npm/_cacache")" \
+      safe "$(m reason.redownloaded)" "cmd:npm cache clean --force"; }
+  if have pnpm; then
+    ps_=$(pnpm store path 2>/dev/null); [[ -d "$ps_" ]] && { kb=$(du_kb "$ps_"); (( kb > 0 )) && add_candidate pnpm "$(m pnpm.label)" "$ps_" "$kb" "$(newest_age_days "$ps_")" \
+      safe "$(m pnpm.reason)" "cmd:pnpm store prune"; }
+  fi
+  if have yarn; then
+    yc=$(yarn cache dir 2>/dev/null); [[ -d "$yc" ]] && { kb=$(du_kb "$yc"); (( kb > 10240 )) && add_candidate yarn "$(m yarn.label)" "$yc" "$kb" "$(newest_age_days "$yc")" \
+      safe "$(m reason.redownloaded)" "cmd:yarn cache clean"; }
+  fi
+  have pip3 && { pc=$(pip3 cache dir 2>/dev/null); [[ -d "$pc" && "$pc" != "$HOME/Library/Caches/pip" ]] && { kb=$(du_kb "$pc"); (( kb > 10240 )) && add_candidate pip "$(m pip.label)" "$pc" "$kb" "$(newest_age_days "$pc")" safe "$(m reason.redownloaded)" "cmd:pip3 cache purge"; }; }
+  have uv && { uc=$(uv cache dir 2>/dev/null); [[ -d "$uc" ]] && { kb=$(du_kb "$uc"); (( kb > 10240 )) && add_candidate uv "$(m uv.label)" "$uc" "$kb" "$(newest_age_days "$uc")" safe "$(m uv.reason)" "cmd:uv cache prune"; }; }
+  [[ -d "$HOME/.cargo/registry" ]] && { kb=$(du_kb "$HOME/.cargo/registry"); (( kb > 10240 )) && add_candidate cargo "$(m cargo.label)" "$HOME/.cargo/registry" "$kb" "$(newest_age_days "$HOME/.cargo/registry")" \
+      caution "$(m cargo.reason)" "rm-contents:$HOME/.cargo/registry/cache"; }
+  [[ -d "$HOME/go/pkg/mod" ]] && { kb=$(du_kb "$HOME/go/pkg/mod"); (( kb > 10240 )) && add_candidate go "$(m go.label)" "$HOME/go/pkg/mod" "$kb" "$(newest_age_days "$HOME/go/pkg/mod")" \
+      caution "$(m go.reason)" "cmd:go clean -modcache"; }
+  [[ -d "$HOME/.gradle/caches" ]] && { kb=$(du_kb "$HOME/.gradle/caches"); (( kb > 10240 )) && add_candidate gradle "$(m gradle.label)" "$HOME/.gradle/caches" "$kb" "$(newest_age_days "$HOME/.gradle/caches")" \
+      "$(verdict_for "$HOME/.gradle/caches" "$CACHE_DAYS" | cut -d'|' -f1)" "$(verdict_for "$HOME/.gradle/caches" "$CACHE_DAYS" | cut -d'|' -f2)" "rm-contents:$HOME/.gradle/caches"; }
+
+  # Docker
+  if have docker && docker info >/dev/null 2>&1; then
+    h2 "$(m docker.title)"
+    docker system df 2>/dev/null | sed 's/^/    /'
+    rec=$(docker system df --format '{{.Reclaimable}}' 2>/dev/null | head -1)
+    add_candidate docker "$(m docker.label)" "docker" "0" "-" caution "$(m docker.reason "${rec:-?}")" "cmd:docker system prune -f"
+  fi
+}
 
 # ----------------------------------------------------------------------------
 # 4. Modèles IA anciens
 # ----------------------------------------------------------------------------
-h1 "$(m models.title)"
-
 rel_to_days() {  # "3 weeks ago" -> 21  (sortie anglaise d'ollama list)
   local n="$1" u="$2"
   case "$u" in
@@ -1062,28 +1078,6 @@ rel_to_days() {  # "3 weeks ago" -> 21  (sortie anglaise d'ollama list)
     *) print 0 ;;
   esac
 }
-
-if have ollama; then
-  h2 "$(m ollama.title)"
-  LOADED=$(ollama ps 2>/dev/null | awk 'NR>1 {print $1}' | tr '\n' ' ')
-  OLL_KB=$(du_kb "$HOME/.ollama/models")
-  info "$(m ollama.store "$(human $OLL_KB)" "${LOADED:-$(m ollama.none_loaded)}")"
-  info "$(m ollama.age_note)"
-  ollama list 2>/dev/null | awk 'NR>1' | while read -r name id sz unit n u rest; do
-    [[ -z "$name" ]] && continue
-    case "$unit" in GB) kb=$(( sz * 1048576 )) ;; MB) kb=$(( sz * 1024 )) ;; *) kb=0 ;; esac
-    kb=${kb%.*}
-    if [[ "$n" == "About" || "$n" == "an" || "$n" == "a" ]]; then days=0; else days=$(rel_to_days "$n" "$u"); fi
-    if [[ " $LOADED " == *" $name "* ]]; then
-      v=caution; reason="$(m model.loaded.reason)"
-    elif (( days >= MODEL_DAYS )); then
-      v=caution; reason="$(m model.ollama_old.reason "$days" "$MODEL_DAYS" "$name")"
-    else
-      v=manual; reason="$(m model.recent.reason "$days")"
-    fi
-    add_candidate model_ollama "$name" "ollama:$name" "$kb" "$days" "$v" "$reason" "cmd:ollama rm $name"
-  done
-fi
 
 scan_model_root() {  # scan_model_root CATEGORIE RACINE  (le libellé de catégorie sert de titre)
   local cat="$1" root="$2" d kb age
@@ -1099,87 +1093,110 @@ scan_model_root() {  # scan_model_root CATEGORIE RACINE  (le libellé de catégo
     add_candidate "$cat" "${d:t}" "$d" "$kb" "$age" "$v" "$reason" "rm-path:$d"
   done
 }
-scan_model_root model_huggingface "$HOME/.cache/huggingface/hub"
-scan_model_root model_lmstudio    "$HOME/.lmstudio/models"
-scan_model_root model_lmstudio    "$HOME/.cache/lm-studio/models"
-scan_model_root model_whisper     "$HOME/.cache/whisper"
-scan_model_root model_torch       "$HOME/.cache/torch/hub/checkpoints"
+
+audit_models() {
+  h1 "$(m models.title)"
+
+  if have ollama; then
+    h2 "$(m ollama.title)"
+    LOADED=$(ollama ps 2>/dev/null | awk 'NR>1 {print $1}' | tr '\n' ' ')
+    OLL_KB=$(du_kb "$HOME/.ollama/models")
+    info "$(m ollama.store "$(human $OLL_KB)" "${LOADED:-$(m ollama.none_loaded)}")"
+    info "$(m ollama.age_note)"
+    ollama list 2>/dev/null | awk 'NR>1' | while read -r name id sz unit n u rest; do
+      [[ -z "$name" ]] && continue
+      case "$unit" in GB) kb=$(( sz * 1048576 )) ;; MB) kb=$(( sz * 1024 )) ;; *) kb=0 ;; esac
+      kb=${kb%.*}
+      if [[ "$n" == "About" || "$n" == "an" || "$n" == "a" ]]; then days=0; else days=$(rel_to_days "$n" "$u"); fi
+      if [[ " $LOADED " == *" $name "* ]]; then
+        v=caution; reason="$(m model.loaded.reason)"
+      elif (( days >= MODEL_DAYS )); then
+        v=caution; reason="$(m model.ollama_old.reason "$days" "$MODEL_DAYS" "$name")"
+      else
+        v=manual; reason="$(m model.recent.reason "$days")"
+      fi
+      add_candidate model_ollama "$name" "ollama:$name" "$kb" "$days" "$v" "$reason" "cmd:ollama rm $name"
+    done
+  fi
+
+  scan_model_root model_huggingface "$HOME/.cache/huggingface/hub"
+  scan_model_root model_lmstudio    "$HOME/.lmstudio/models"
+  scan_model_root model_lmstudio    "$HOME/.cache/lm-studio/models"
+  scan_model_root model_whisper     "$HOME/.cache/whisper"
+  scan_model_root model_torch       "$HOME/.cache/torch/hub/checkpoints"
+}
 
 # ----------------------------------------------------------------------------
 # 5. Gros volumes divers
 # ----------------------------------------------------------------------------
-h1 "$(m big.title)"
+audit_big() {
+  h1 "$(m big.title)"
 
-# Snapshots Time Machine locaux
-if (( SNAP_COUNT > 0 )); then
-  tmutil listlocalsnapshots / 2>/dev/null | grep 'com.apple.TimeMachine' | while read -r s; do
-    d="${s#com.apple.TimeMachine.}"; d="${d%.local}"
-    add_candidate tm_snapshot "$d" "snapshot:$d" "0" "-" caution "$(m snapshot.reason)" "cmd:tmutil deletelocalsnapshots $d"
-  done
-fi
+  # Snapshots Time Machine locaux
+  if (( SNAP_COUNT > 0 )); then
+    tmutil listlocalsnapshots / 2>/dev/null | grep 'com.apple.TimeMachine' | while read -r s; do
+      d="${s#com.apple.TimeMachine.}"; d="${d%.local}"
+      add_candidate tm_snapshot "$d" "snapshot:$d" "0" "-" caution "$(m snapshot.reason)" "cmd:tmutil deletelocalsnapshots $d"
+    done
+  fi
 
-# Corbeille
-kb=$(du_kb "$HOME/.Trash")
-(( kb > 10240 )) && add_candidate trash "~/.Trash" "$HOME/.Trash" "$kb" "$(newest_age_days "$HOME/.Trash")" caution "$(m trash.reason)" "rm-contents:$HOME/.Trash"
+  # Corbeille
+  kb=$(du_kb "$HOME/.Trash")
+  (( kb > 10240 )) && add_candidate trash "~/.Trash" "$HOME/.Trash" "$kb" "$(newest_age_days "$HOME/.Trash")" caution "$(m trash.reason)" "rm-contents:$HOME/.Trash"
 
-# Sauvegardes iOS, pièces jointes Mail
-MB="$HOME/Library/Application Support/MobileSync/Backup"
-[[ -d "$MB" ]] && { kb=$(du_kb "$MB"); (( kb > 10240 )) && add_candidate ios_backups "MobileSync/Backup" "$MB" "$kb" "$(newest_age_days "$MB")" manual "$(m ios_backups.reason)" "none"; }
-MD="$HOME/Library/Containers/com.apple.mail/Data/Library/Mail Downloads"
-[[ -d "$MD" ]] && { kb=$(du_kb "$MD"); (( kb > 10240 )) && add_candidate mail "$(m mail.label)" "$MD" "$kb" "$(newest_age_days "$MD")" safe "$(m mail.reason)" "rm-contents:$MD"; }
+  # Sauvegardes iOS, pièces jointes Mail
+  MB="$HOME/Library/Application Support/MobileSync/Backup"
+  [[ -d "$MB" ]] && { kb=$(du_kb "$MB"); (( kb > 10240 )) && add_candidate ios_backups "MobileSync/Backup" "$MB" "$kb" "$(newest_age_days "$MB")" manual "$(m ios_backups.reason)" "none"; }
+  MD="$HOME/Library/Containers/com.apple.mail/Data/Library/Mail Downloads"
+  [[ -d "$MD" ]] && { kb=$(du_kb "$MD"); (( kb > 10240 )) && add_candidate mail "$(m mail.label)" "$MD" "$kb" "$(newest_age_days "$MD")" safe "$(m mail.reason)" "rm-contents:$MD"; }
 
-# node_modules / .venv / target de projets inactifs
-h2 "$(m deps.title)"
-find "$HOME" -maxdepth 6 \( -name node_modules -o -name .venv -o -name venv -o -name target \) -type d -prune \
-  -not -path "$HOME/Library/*" -not -path "$HOME/.*" 2>/dev/null | while read -r d; do
-  proj="${d:h}"
-  [[ "${d:t}" == "target" && ! -f "$proj/Cargo.toml" ]] && continue
-  skip=0; for ap in "${ACTIVE_PROJECTS[@]}"; do [[ "$proj" == "$ap" || "$proj" == "$ap"/* ]] && skip=1; done
-  (( skip )) && continue
-  kb=$(du_kb "$d"); (( kb < 51200 )) && continue
-  age=$(newest_age_days "$proj")
-  (( age < ACTIVE_DAYS )) && continue
-  add_candidate inactive_project "${proj/#$HOME/~}/${d:t}" "$d" "$kb" "$age" caution "$(m deps.reason "$age")" "rm-path:$d"
-done
-
-# Téléchargements : gros fichiers anciens (liste seulement)
-h2 "$(m downloads.title)"
-find "$HOME/Downloads" -maxdepth 1 -type f -size +100M -mtime +90 -print0 2>/dev/null \
-  | xargs -0 du -sk 2>/dev/null | sort -rn | head -"$TOP" | while read -r kb f; do
-    info "$(printf '%9s' "$(human $kb)")  ${f/#$HOME/~}"
-  done
-kb=$(find "$HOME/Downloads" -maxdepth 1 -type f -size +100M -mtime +90 -print0 2>/dev/null | xargs -0 du -sk 2>/dev/null | awk '{s+=$1} END{print s+0}')
-(( kb > 0 )) && add_candidate downloads "$(m downloads.label)" "$HOME/Downloads" "$kb" "90+" manual "$(m reason.sort_by_hand)" "none"
-
-# Données d'applications (informatif : jamais touché, mais souvent là que ça pèse)
-h2 "$(m appdata.title "$TOP")"
-{ du -xk -d 1 "$HOME/Library/Application Support" 2>/dev/null; du -xk -d 1 "$HOME/Library/Containers" 2>/dev/null; } \
-  | sort -rn | awk -F'\t' -v a="$HOME/Library/Application Support" -v c="$HOME/Library/Containers" '$2!=a && $2!=c' | head -"$TOP" | while IFS=$'\t' read -r kb d; do
-    info "$(printf '%9s' "$(human $kb)")  ${d/#$HOME/~}"
+  # node_modules / .venv / target de projets inactifs
+  h2 "$(m deps.title)"
+  find "$HOME" -maxdepth 6 \( -name node_modules -o -name .venv -o -name venv -o -name target \) -type d -prune \
+    -not -path "$HOME/Library/*" -not -path "$HOME/.*" 2>/dev/null | while read -r d; do
+    proj="${d:h}"
+    [[ "${d:t}" == "target" && ! -f "$proj/Cargo.toml" ]] && continue
+    skip=0; for ap in "${ACTIVE_PROJECTS[@]}"; do [[ "$proj" == "$ap" || "$proj" == "$ap"/* ]] && skip=1; done
+    (( skip )) && continue
+    kb=$(du_kb "$d"); (( kb < 51200 )) && continue
+    age=$(newest_age_days "$proj")
+    (( age < ACTIVE_DAYS )) && continue
+    add_candidate inactive_project "${proj/#$HOME/~}/${d:t}" "$d" "$kb" "$age" caution "$(m deps.reason "$age")" "rm-path:$d"
   done
 
-AC="$HOME/Library/Application Support/com.apple.container"
-[[ -d "$AC" ]] && { kb=$(du_kb "$AC"); (( kb > 102400 )) && add_candidate apple_container "$(m apple_container.label)" "$AC" "$kb" "$(newest_age_days "$AC")" manual "$(m apple_container.reason)" "none"; }
-MW="$HOME/Library/Application Support/MacWhisper"
-[[ -d "$MW" ]] && { kb=$(du_kb "$MW"); (( kb > 102400 )) && add_candidate model_macwhisper "$(m macwhisper.label)" "$MW" "$kb" "$(newest_age_days "$MW")" manual "$(m macwhisper.reason)" "none"; }
+  # Téléchargements : gros fichiers anciens (liste seulement)
+  h2 "$(m downloads.title)"
+  find "$HOME/Downloads" -maxdepth 1 -type f -size +100M -mtime +90 -print0 2>/dev/null \
+    | xargs -0 du -sk 2>/dev/null | sort -rn | head -"$TOP" | while read -r kb f; do
+      info "$(printf '%9s' "$(human $kb)")  ${f/#$HOME/~}"
+    done
+  kb=$(find "$HOME/Downloads" -maxdepth 1 -type f -size +100M -mtime +90 -print0 2>/dev/null | xargs -0 du -sk 2>/dev/null | awk '{s+=$1} END{print s+0}')
+  (( kb > 0 )) && add_candidate downloads "$(m downloads.label)" "$HOME/Downloads" "$kb" "90+" manual "$(m reason.sort_by_hand)" "none"
 
-# Top dossiers du home (vue d'ensemble)
-if (( ! FAST )); then
-  h2 "$(m home.title "$TOP")"
-  du -xk -d 2 "$HOME" 2>/dev/null | sort -rn | awk -v home="$HOME" 'NR>1 && NR<=1000 {print}' | head -"$TOP" | while read -r kb d; do
-    info "$(printf '%9s' "$(human $kb)")  ${d/#$HOME/~}"
-  done
-fi
+  # Données d'applications (informatif : jamais touché, mais souvent là que ça pèse)
+  h2 "$(m appdata.title "$TOP")"
+  { du -xk -d 1 "$HOME/Library/Application Support" 2>/dev/null; du -xk -d 1 "$HOME/Library/Containers" 2>/dev/null; } \
+    | sort -rn | awk -F'\t' -v a="$HOME/Library/Application Support" -v c="$HOME/Library/Containers" '$2!=a && $2!=c' | head -"$TOP" | while IFS=$'\t' read -r kb d; do
+      info "$(printf '%9s' "$(human $kb)")  ${d/#$HOME/~}"
+    done
+
+  AC="$HOME/Library/Application Support/com.apple.container"
+  [[ -d "$AC" ]] && { kb=$(du_kb "$AC"); (( kb > 102400 )) && add_candidate apple_container "$(m apple_container.label)" "$AC" "$kb" "$(newest_age_days "$AC")" manual "$(m apple_container.reason)" "none"; }
+  MW="$HOME/Library/Application Support/MacWhisper"
+  [[ -d "$MW" ]] && { kb=$(du_kb "$MW"); (( kb > 102400 )) && add_candidate model_macwhisper "$(m macwhisper.label)" "$MW" "$kb" "$(newest_age_days "$MW")" manual "$(m macwhisper.reason)" "none"; }
+
+  # Top dossiers du home (vue d'ensemble)
+  if (( ! FAST )); then
+    h2 "$(m home.title "$TOP")"
+    du -xk -d 2 "$HOME" 2>/dev/null | sort -rn | awk -v home="$HOME" 'NR>1 && NR<=1000 {print}' | head -"$TOP" | while read -r kb d; do
+      info "$(printf '%9s' "$(human $kb)")  ${d/#$HOME/~}"
+    done
+  fi
+}
 
 # ----------------------------------------------------------------------------
 # 6. Plan de nettoyage
 # ----------------------------------------------------------------------------
-h1 "$(m plan.title)"
-
-typeset -a ORDER
-# tri par taille décroissante
-for i in {1..${#CAND_PATH}}; do print -- "${CAND_KB[$i]} $i"; done | sort -rn | awk '{print $2}' | while read -r i; do ORDER+=("$i"); done
-
 describe_action() {
   local kind="${1%%:*}" arg="${1#*:}"
   case "$kind" in
@@ -1192,7 +1209,6 @@ describe_action() {
   esac
 }
 
-SAFE_KB=0 CAUT_KB=0 MAN_KB=0 SAFE_N=0 CAUT_N=0 MAN_N=0
 print_group() {  # print_group VERDICT TITRE
   local want="$1" title="$2" i shown=0
   for i in "${ORDER[@]}"; do
@@ -1203,33 +1219,35 @@ print_group() {  # print_group VERDICT TITRE
   done
   (( shown )) || { h2 "$title"; info "$(m plan.group.empty)"; }
 }
-for i in {1..${#CAND_PATH}}; do
-  case "${CAND_VERDICT[$i]}" in
-    safe)    (( SAFE_KB += CAND_KB[$i] )); (( SAFE_N++ )) ;;
-    caution) (( CAUT_KB += CAND_KB[$i] )); (( CAUT_N++ )) ;;
-    manual)  (( MAN_KB  += CAND_KB[$i] )); (( MAN_N++ )) ;;
-  esac
-done
 
-print_group safe    "${C_GREEN}$(m plan.group.safe    "$(m verdict.safe)"    "$SAFE_N" "$(human $SAFE_KB)")${C_RESET}"
-print_group caution "${C_YELLOW}$(m plan.group.caution "$(m verdict.caution)" "$CAUT_N" "$(human $CAUT_KB)")${C_RESET}"
-print_group manual  "${C_DIM}$(m plan.group.manual   "$(m verdict.manual)"  "$MAN_N"  "$(human $MAN_KB)")${C_RESET}"
+show_plan() {
+  h1 "$(m plan.title)"
 
-print
-say "$(m plan.summary "$(human $SAFE_KB)" "$(human $CAUT_KB)" "$(human $MAN_KB)")"
-say "$(m plan.status "${#ACTIVE_PROJECTS}" "$( ((SPOT_SUSPECT)) && print -- "${C_RED}$(m plan.spotlight.suspect)${C_RESET}" || print -- "${C_GREEN}$(m plan.spotlight.healthy)${C_RESET}" )")"
+  typeset -ga ORDER; ORDER=()
+  # tri par taille décroissante
+  for i in {1..${#CAND_PATH}}; do print -- "${CAND_KB[$i]} $i"; done | sort -rn | awk '{print $2}' | while read -r i; do ORDER+=("$i"); done
 
-if (( DRY_RUN )); then
+  SAFE_KB=0 CAUT_KB=0 MAN_KB=0 SAFE_N=0 CAUT_N=0 MAN_N=0
+  for i in {1..${#CAND_PATH}}; do
+    case "${CAND_VERDICT[$i]}" in
+      safe)    (( SAFE_KB += CAND_KB[$i] )); (( SAFE_N++ )) ;;
+      caution) (( CAUT_KB += CAND_KB[$i] )); (( CAUT_N++ )) ;;
+      manual)  (( MAN_KB  += CAND_KB[$i] )); (( MAN_N++ )) ;;
+    esac
+  done
+
+  print_group safe    "${C_GREEN}$(m plan.group.safe    "$(m verdict.safe)"    "$SAFE_N" "$(human $SAFE_KB)")${C_RESET}"
+  print_group caution "${C_YELLOW}$(m plan.group.caution "$(m verdict.caution)" "$CAUT_N" "$(human $CAUT_KB)")${C_RESET}"
+  print_group manual  "${C_DIM}$(m plan.group.manual   "$(m verdict.manual)"  "$MAN_N"  "$(human $MAN_KB)")${C_RESET}"
+
   print
-  dim "$(m plan.dry_run)"
-  exit 0
-fi
+  say "$(m plan.summary "$(human $SAFE_KB)" "$(human $CAUT_KB)" "$(human $MAN_KB)")"
+  say "$(m plan.status "${#ACTIVE_PROJECTS}" "$( ((SPOT_SUSPECT)) && print -- "${C_RED}$(m plan.spotlight.suspect)${C_RESET}" || print -- "${C_GREEN}$(m plan.spotlight.healthy)${C_RESET}" )")"
+}
 
 # ----------------------------------------------------------------------------
 # 7. Exécution
 # ----------------------------------------------------------------------------
-h1 "$(m exec.title)"
-
 run_action() {  # run_action ACTION  -> exécute, 0 si ok
   local a="$1" kind="${1%%:*}" arg="${1#*:}" p days
   case "$kind" in
@@ -1254,44 +1272,82 @@ ask() {  # ask "question" -> 0 si la réponse figure dans answer.confirm_yes
   answer_in answer.confirm_yes "$r"
 }
 
-FREED_BEFORE=$(df -k "$DATA_VOL" | tail -1 | awk '{print $4}')
-DONE_N=0
+execute_plan() {
+  h1 "$(m exec.title)"
 
-if (( SAFE_N > 0 )); then
-  if (( ASSUME_YES )) || ask "$(m exec.confirm_safe "$SAFE_N" "$(human $SAFE_KB)")"; then
-    for i in "${ORDER[@]}"; do
-      [[ "${CAND_VERDICT[$i]}" == safe && "${CAND_ACTION[$i]}" != "none" ]] || continue
-      print -n -- "  ${CAND_LABEL[$i]:0:60} … "
-      if run_action "${CAND_ACTION[$i]}" >> "$LOG_FILE" 2>&1; then print -- "${C_GREEN}$(m exec.ok)${C_RESET}"; (( DONE_N++ )); else print -- "${C_RED}$(m exec.failed)${C_RESET}"; fi
-    done
-  else
-    info "$(m exec.safe_skipped)"
-  fi
-fi
+  FREED_BEFORE=$(df -k "$DATA_VOL" | tail -1 | awk '{print $4}')
+  DONE_N=0
 
-if (( CAUT_N > 0 )) && [[ -t 0 ]]; then
-  print
-  say "$(m exec.caution_intro)"
-  for i in "${ORDER[@]}"; do
-    [[ "${CAND_VERDICT[$i]}" == caution && "${CAND_ACTION[$i]}" != "none" ]] || continue
-    print -n -- "  [$(human ${CAND_KB[$i]})] $(m cat.${CAND_CAT[$i]}) · ${CAND_LABEL[$i]:0:50} — ${C_DIM}${CAND_REASON[$i]}${C_RESET}  $(m exec.caution_choices) "
-    read -r r
-    if answer_in answer.item_quit "$r"; then
-      break
-    elif answer_in answer.item_yes "$r"; then
-      if run_action "${CAND_ACTION[$i]}" >> "$LOG_FILE" 2>&1; then ok "$(m exec.done)"; (( DONE_N++ )); else bad "$(m exec.failed)"; fi
+  if (( SAFE_N > 0 )); then
+    if (( ASSUME_YES )) || ask "$(m exec.confirm_safe "$SAFE_N" "$(human $SAFE_KB)")"; then
+      for i in "${ORDER[@]}"; do
+        [[ "${CAND_VERDICT[$i]}" == safe && "${CAND_ACTION[$i]}" != "none" ]] || continue
+        print -n -- "  ${CAND_LABEL[$i]:0:60} … "
+        if run_action "${CAND_ACTION[$i]}" >> "$LOG_FILE" 2>&1; then print -- "${C_GREEN}$(m exec.ok)${C_RESET}"; (( DONE_N++ )); else print -- "${C_RED}$(m exec.failed)${C_RESET}"; fi
+      done
     else
-      info "$(m exec.skipped)"
+      info "$(m exec.safe_skipped)"
     fi
-  done
-elif (( CAUT_N > 0 )); then
-  info "$(m exec.caution_not_offered)"
-fi
+  fi
 
-sleep 2
-FREED_AFTER=$(df -k "$DATA_VOL" | tail -1 | awk '{print $4}')
-FREED=$(( FREED_AFTER - FREED_BEFORE )); (( FREED < 0 )) && FREED=0
-print
-say "$(m exec.summary "$DONE_N" "$(human $FREED)" "$(human $FREED_AFTER)")"
-dim "$(m exec.apfs_note)"
-dim "$(m exec.log "$LOG_FILE")"
+  if (( CAUT_N > 0 )) && [[ -t 0 ]]; then
+    print
+    say "$(m exec.caution_intro)"
+    for i in "${ORDER[@]}"; do
+      [[ "${CAND_VERDICT[$i]}" == caution && "${CAND_ACTION[$i]}" != "none" ]] || continue
+      print -n -- "  [$(human ${CAND_KB[$i]})] $(m cat.${CAND_CAT[$i]}) · ${CAND_LABEL[$i]:0:50} — ${C_DIM}${CAND_REASON[$i]}${C_RESET}  $(m exec.caution_choices) "
+      read -r r
+      if answer_in answer.item_quit "$r"; then
+        break
+      elif answer_in answer.item_yes "$r"; then
+        if run_action "${CAND_ACTION[$i]}" >> "$LOG_FILE" 2>&1; then ok "$(m exec.done)"; (( DONE_N++ )); else bad "$(m exec.failed)"; fi
+      else
+        info "$(m exec.skipped)"
+      fi
+    done
+  elif (( CAUT_N > 0 )); then
+    info "$(m exec.caution_not_offered)"
+  fi
+
+  sleep 2
+  FREED_AFTER=$(df -k "$DATA_VOL" | tail -1 | awk '{print $4}')
+  FREED=$(( FREED_AFTER - FREED_BEFORE )); (( FREED < 0 )) && FREED=0
+  print
+  say "$(m exec.summary "$DONE_N" "$(human $FREED)" "$(human $FREED_AFTER)")"
+  dim "$(m exec.apfs_note)"
+  dim "$(m exec.log "$LOG_FILE")"
+}
+
+# ----------------------------------------------------------------------------
+# Programme principal
+# ----------------------------------------------------------------------------
+main() {
+  parse_args "$@"
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    print -u2 -- "$(m err.macos_only)"; exit 1
+  fi
+  setup_output
+  audit_disk
+  audit_active
+  (( SKIP_SPOTLIGHT )) || audit_spotlight
+  audit_caches
+  audit_models
+  audit_big
+  show_plan
+  if (( DRY_RUN )); then
+    print
+    dim "$(m plan.dry_run)"
+    return 0
+  fi
+  execute_plan
+}
+
+# Exécuté (./mister-clean.sh, zsh mister-clean.sh) : lance l'audit.
+# Chargé (source mister-clean.sh, cas des tests) : définit seulement les
+# fonctions et les réglages par défaut, sans rien auditer ni supprimer.
+# Le trap est posé ici, hors de toute fonction : en zsh, un trap EXIT posé
+# dans une fonction se déclencherait dès la fin de celle-ci.
+if [[ "$ZSH_EVAL_CONTEXT" == toplevel ]]; then
+  trap '[[ -n "${TMP-}" ]] && rm -rf "$TMP"' EXIT
+  main "$@"
+fi
