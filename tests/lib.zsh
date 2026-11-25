@@ -106,6 +106,35 @@ age_path() {
   find "$1" -exec touch -t "$stamp" {} +
 }
 
+# --- Contrôle du catalogue de sources ----------------------------------------
+
+# CATALOGUE_CHECK : code à passer à in_sandbox. Contrôle chaque ligne de
+# SOURCES (colonnes, section, seuil, verdict, outil, fonction de taille) et la
+# présence de ses clés de messages en français et en anglais. Affiche une ligne
+# par problème (avec la clé et la langue), puis « entrées=N ».
+CATALOGUE_CHECK='
+    setopt extended_glob; n=0
+    for line in ${(f)SOURCES}; do
+      [[ "$line" == [[:space:]]#(\#*|) ]] && continue
+      f=("${(@s:|:)line}"); f=("${(@)${(@)f##[[:space:]]##}%%[[:space:]]##}")
+      (( ${#f} == 10 )) || { print "colonnes: $line"; continue; }
+      [[ $f[1] == (logs|dev|pkg|big|appdata) ]] || print "section: $line"
+      [[ -n "${SIZE_MIN[$f[5]]-}" ]] || print "seuil: $line"
+      [[ $f[6] == (safe|caution|manual|age|age!*=*) ]] || print "verdict: $line"
+      for lang in fr en; do
+        messages_$lang
+        [[ -n "${MSG[cat.$f[2]]-}" ]] || print "cat.$f[2] ($lang)"
+        [[ $f[7] == - || -n "${MSG[$f[7]]-}" ]] || print "raison $f[7] ($lang)"
+        lw=(${(z)${f[9]#@}})
+        [[ $f[9] != @* || -n "${MSG[$lw[1]]-}" ]] || print "libellé $f[9] ($lang)"
+        [[ $f[6] != age!* || -n "${MSG[${f[6]#*=}]-}" ]] || print "raison ${f[6]#*=} ($lang)"
+      done
+      [[ $f[10] == du ]] || whence -w "$f[10]" >/dev/null || print "taille: $f[10]"
+      [[ $f[4] == - || $f[3] != "\$ "* || $f[3] == "\$ $f[4] "* ]] || print "outil: $line"
+      n=$((n+1))
+    done
+    print "entrées=$n"'
+
 # --- Assertions ---------------------------------------------------------------
 
 fail() { print -u2 -r -- "    ÉCHEC : $*"; exit 1; }
