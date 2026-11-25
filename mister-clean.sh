@@ -190,6 +190,13 @@ EOF
     reason.unused           "non modifié depuis ≥ %s j, régénérable"
     reason.redownloaded     "retéléchargé à la demande"
     reason.sort_by_hand     "à trier à la main"
+    git.reason.clean        "worktree propre et poussé, non modifié depuis ≥ %s j"
+    git.reason.dirty        "modifications non commitées : à commiter ou jeter à la main"
+    git.reason.unpushed     "%s commit(s) non poussé(s)"
+    git.reason.no_upstream  "pas de branche distante : travail jamais poussé"
+    git.reason.detached     "HEAD détaché : commits peut-être sur aucune branche"
+    git.reason.not_worktree "pas un worktree git (ou dépôt parent introuvable)"
+    git.reason.recent       "worktree modifié il y a moins de %s j"
 
     # --- Candidats : libellés et raisons, par source
     spotlight.rebuild.label "Reconstruire l'index Spotlight (mdutil -E /)"
@@ -464,6 +471,13 @@ EOF
     reason.unused           "untouched for ≥ %s d, regenerable"
     reason.redownloaded     "re-downloaded on demand"
     reason.sort_by_hand     "sort by hand"
+    git.reason.clean        "clean, pushed worktree, untouched for ≥ %s d"
+    git.reason.dirty        "uncommitted changes: commit or discard them by hand"
+    git.reason.unpushed     "%s unpushed commit(s)"
+    git.reason.no_upstream  "no remote branch: work never pushed"
+    git.reason.detached     "detached HEAD: commits may be on no branch"
+    git.reason.not_worktree "not a git worktree (or parent repository missing)"
+    git.reason.recent       "worktree modified less than %s d ago"
 
     # --- Candidates: labels and reasons, by source
     spotlight.rebuild.label "Rebuild the Spotlight index (mdutil -E /)"
@@ -1213,6 +1227,12 @@ SIZE_MIN=(cache 10240 bulky 51200 appdata 102400)
 #            la raison est la clé du message « ancien », qui reçoit l'âge et
 #            --model-days. Avec un joker (racine/*), chaque modèle est un
 #            candidat ; scan_cache_dir ignore ces racines (is_model_area).
+#   git      worktrees git (ceux des agents de code) : caution seulement pour
+#            un worktree propre, poussé, non modifié depuis --days jours ;
+#            manual sinon, avec la raison précise (voir git_verdict). Jamais
+#            safe. Outil requis : git. Action conseillée :
+#            cmd git -C {path} worktree remove {path}  (sans --force : git
+#            refuse lui-même s'il reste du travail).
 # Ajouter une règle : une branche dans source_verdict, documentée ici.
 #
 # Ajouter un outil = ajouter une ligne.
@@ -1325,6 +1345,9 @@ source_verdict() {
       fi
       IFS='|' read -r v r <<< "$(verdict_for "$p" "$CACHE_DAYS" "$r")"
       add_candidate "$cat" "$label" "$p" "$kb" "$age" "$v" "$r" "$action" ;;
+    git)
+      IFS='|' read -r v r <<< "$(git_verdict "$p" "$CACHE_DAYS")"
+      add_candidate "$cat" "$label" "$p" "$kb" "$age" "$v" "$r" "$action" ;;
     model)
       [[ "$_LAST_MODEL_CAT" == "$cat" ]] || { h2 "$(m cat.$cat)"; _LAST_MODEL_CAT="$cat"; }
       add_model "$cat" "$label" "$p" "$kb" "$age" 0 "$(m $reason "$age" "$MODEL_DAYS")" "$action" ;;
@@ -1403,6 +1426,28 @@ add_model() {
   elif (( age >= MODEL_DAYS )); then v=caution; reason="$old_reason"
   else v=manual; reason="$(m model.recent.reason "$age")"; fi
   add_candidate "$cat" "$label" "$p" "$kb" "$age" "$v" "$reason" "$action"
+}
+
+# git_verdict CHEMIN JOURS -> "VERDICT|raison" pour un worktree git.
+# Tout ce qui pourrait contenir du travail irrécupérable reste manual :
+# pas un worktree lié (.git doit être un fichier), modifications non
+# commitées (fichiers non suivis compris), HEAD détaché, pas de branche
+# distante, commits non poussés, modifié depuis moins de JOURS jours.
+# Sinon caution, jamais safe.
+git_verdict() {
+  local p="$1" days="$2" top n
+  local -a g; g=(git -C "$p")
+  if [[ ! -f "$p/.git" ]] || ! top="$($g rev-parse --show-toplevel 2>/dev/null)" || [[ "${top:A}" != "${p:A}" ]]; then
+    print -r -- "manual|$(m git.reason.not_worktree)"; return
+  fi
+  [[ -z "$($g status --porcelain 2>/dev/null)" ]] || { print -r -- "manual|$(m git.reason.dirty)"; return; }
+  $g symbolic-ref -q HEAD >/dev/null 2>&1 || { print -r -- "manual|$(m git.reason.detached)"; return; }
+  $g rev-parse --verify -q '@{upstream}' >/dev/null 2>&1 || { print -r -- "manual|$(m git.reason.no_upstream)"; return; }
+  n="$($g rev-list --count '@{upstream}..HEAD' 2>/dev/null)"
+  [[ "$n" == <-> ]] || { print -r -- "manual|$(m git.reason.no_upstream)"; return; }
+  (( n == 0 )) || { print -r -- "manual|$(m git.reason.unpushed "$n")"; return; }
+  is_recent "$p" "$days" && { print -r -- "manual|$(m git.reason.recent "$days")"; return; }
+  print -r -- "caution|$(m git.reason.clean "$days")"
 }
 
 # model_roots : racines de modèles déclarées au catalogue (lignes au verdict
