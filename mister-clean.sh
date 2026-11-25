@@ -139,7 +139,7 @@ EOF
     active.scanning_lsof    "Fichiers ouverts par vos processus (lsof)…"
     active.found            "%s projet(s) considéré(s) en cours — rien n'y sera touché :"
     active.none             "Aucun projet actif détecté."
-    active.open_files       "%s fichiers ouverts sous ~ (tout cache contenant l'un d'eux passera en PRUDENCE)."
+    active.open_files       "%s fichiers ouverts sous ~ (tout candidat contenant l'un d'eux passera en PRUDENCE)."
     active.running_apps     "Apps en cours d'exécution : %s"
 
     # --- 2. Spotlight
@@ -184,6 +184,7 @@ EOF
 
     # --- Raisons de verdict communes
     reason.in_active_project "dans le projet en cours %s"
+    reason.contains_active_project "contient le projet en cours %s"
     reason.open_file        "fichier ouvert par un processus : %s"
     reason.recent           "modifié il y a moins de %s j (encore utilisé, sera régénéré)"
     reason.unused           "non modifié depuis ≥ %s j, régénérable"
@@ -410,7 +411,7 @@ EOF
     active.scanning_lsof    "Files open by your processes (lsof)…"
     active.found            "%s project(s) considered active — nothing will be touched there:"
     active.none             "No active project detected."
-    active.open_files       "%s open files under ~ (any cache containing one of them is downgraded to CAUTION)."
+    active.open_files       "%s open files under ~ (any candidate containing one of them is downgraded to CAUTION)."
     active.running_apps     "Running apps: %s"
 
     # --- 2. Spotlight
@@ -455,6 +456,7 @@ EOF
 
     # --- Common verdict reasons
     reason.in_active_project "inside active project %s"
+    reason.contains_active_project "contains active project %s"
     reason.open_file        "file open by a process: %s"
     reason.recent           "modified less than %s d ago (still in use, will be regenerated)"
     reason.unused           "untouched for ≥ %s d, regenerable"
@@ -743,36 +745,54 @@ is_running() { pgrep -x "$1" >/dev/null 2>&1; }
 # CAND_CAT    : clé de catégorie (libellé : MSG[cat.<clé>])
 # CAND_VERDICT: safe | caution | manual (libellé : MSG[verdict.<valeur>])
 # CAND_LABEL, CAND_REASON : textes déjà rendus depuis le catalogue
+#
+# Le filet de sécurité vit ici, pas dans les scans : un scan propose un chemin
+# et le verdict qu'il souhaite ; add_candidate rétrograde en caution tout
+# candidat qui touche un projet en cours ou un fichier ouvert (voir
+# conflict_reason). Un nouveau scan ne peut donc pas l'oublier.
 typeset -ga CAND_CAT CAND_LABEL CAND_PATH CAND_KB CAND_AGE CAND_VERDICT CAND_REASON CAND_ACTION
+# Rempli par audit_active : projets en cours, fichiers ouverts sous ~ (chemins absolus).
 typeset -ga OPEN_FILES ACTIVE_PROJECTS
 
 # add_candidate CAT LABEL PATH KB AGE VERDICT RAISON ACTION
+# VERDICT et RAISON sont ceux que le scan souhaite. Si PATH est en conflit
+# (projet en cours, fichier ouvert), un candidat safe ou caution entre en
+# caution avec la raison du conflit ; un candidat manual reste manual (le
+# script n'y touche jamais).
 add_candidate() {
+  local verdict="$6" reason="$7" c
+  if [[ "$verdict" != manual ]]; then
+    c="$(conflict_reason "$3")"
+    [[ -n "$c" ]] && { verdict=caution; reason="$c"; }
+  fi
   CAND_CAT+=("$1"); CAND_LABEL+=("$2"); CAND_PATH+=("$3"); CAND_KB+=("$4")
-  CAND_AGE+=("$5"); CAND_VERDICT+=("$6"); CAND_REASON+=("$7"); CAND_ACTION+=("$8")
+  CAND_AGE+=("$5"); CAND_VERDICT+=("$verdict"); CAND_REASON+=("$reason"); CAND_ACTION+=("$8")
 }
 
-# Un chemin est-il "touché" par un projet en cours ou un fichier ouvert ?
-# Affiche la raison, vide si rien.
+# conflict_reason PATH : raison pour laquelle PATH touche un projet en cours
+# (PATH dans le projet, ou le projet dans PATH) ou un fichier ouvert (PATH
+# lui-même ou un fichier dessous). N'affiche rien s'il n'y a pas de conflit,
+# ni si PATH n'est pas un chemin (docker, ollama:…, snapshot:…).
 conflict_reason() {
   local p="$1" proj f
+  [[ "$p" == /* ]] || return 0
   for proj in "${ACTIVE_PROJECTS[@]}"; do
-    [[ "$p" == "$proj" || "$p" == "$proj"/* ]] && { print -- "$(m reason.in_active_project "$proj")"; return; }
+    if [[ "$p" == "$proj" || "$p" == "$proj"/* ]]; then
+      print -r -- "$(m reason.in_active_project "$proj")"; return
+    elif [[ "$proj" == "$p"/* ]]; then
+      print -r -- "$(m reason.contains_active_project "$proj")"; return
+    fi
   done
-  if [[ -s "$TMP/open_files" ]] && grep -q -F -- "$p/" "$TMP/open_files"; then
-    f=$(grep -F -- "$p/" "$TMP/open_files" | head -1)
-    print -- "$(m reason.open_file "${f#$p/}")"
-    return
-  fi
-  print -- ""
+  f="${OPEN_FILES[(r)${(b)p}(|/*)]-}"
+  [[ -z "$f" ]] && return 0
+  [[ "$f" == "$p" ]] && f="${f:t}" || f="${f#$p/}"
+  print -r -- "$(m reason.open_file "$f")"
 }
 
-# Décide safe / caution selon l'âge et les conflits.
+# Verdict souhaité selon l'âge (les conflits sont l'affaire du registre).
 # verdict_for PATH DAYS_THRESHOLD "raison si caution forcée"  ->  "VERDICT|raison"
 verdict_for() {
-  local p="$1" days="$2" forced="${3:-}" c
-  c=$(conflict_reason "$p")
-  if [[ -n "$c" ]]; then print -- "caution|$c"; return; fi
+  local p="$1" days="$2" forced="${3:-}"
   if [[ -n "$forced" ]]; then print -- "caution|$forced"; return; fi
   if is_recent "$p" "$days"; then
     print -- "caution|$(m reason.recent "$days")"
@@ -929,6 +949,9 @@ audit_active() {
   info "$(m active.scanning_git "$ACTIVE_DAYS")"
   while IFS= read -r gitdir; do
     proj="${gitdir:h}"
+    # Un dépôt à la racine de ~ (dotfiles) protégerait tout ~ : on l'ignore,
+    # comme les répertoires de travail égaux à ~ plus bas.
+    [[ "$proj" == "$HOME" ]] && continue
     if [[ -n "$(find "$proj" -maxdepth 4 -type f -mtime -"$ACTIVE_DAYS" \
           -not -path '*/node_modules/*' -not -path '*/.git/*' -print -quit 2>/dev/null)" ]]; then
       ACTIVE_PROJECTS+=("$proj")
@@ -938,7 +961,9 @@ audit_active() {
             -not -path '*/node_modules/*' -not -path "$HOME/.*/*" 2>/dev/null)
 
   info "$(m active.scanning_lsof)"
-  lsof -n -u "$USER" -F n 2>/dev/null | sed -n 's/^n//p' | grep "^$HOME/" | sort -u > "$TMP/open_files" || true
+  OPEN_FILES=(${(f)"$(lsof -n -u "$USER" -F n 2>/dev/null | sed -n 's/^n//p' | grep "^$HOME/" | sort -u)"})
+  # Le journal de cette exécution est forcément ouvert : il ne protège rien.
+  OPEN_FILES=(${OPEN_FILES:#${(b)LOG_DIR}/*})
   # Répertoires de travail des shells/éditeurs = projets en cours aussi
   lsof -n -u "$USER" -a -d cwd -F n 2>/dev/null | sed -n 's/^n//p' | grep "^$HOME/" | grep -v "^$HOME/Library" | sort -u > "$TMP/cwds" || true
   while IFS= read -r d; do
@@ -955,7 +980,7 @@ audit_active() {
   else
     ok "$(m active.none)"
   fi
-  info "$(m active.open_files "$(wc -l < "$TMP/open_files" | tr -d ' ')")"
+  info "$(m active.open_files "${#OPEN_FILES}")"
 
   typeset -a RUNNING_APPS
   for app in Xcode ollama "Docker" "Code" "Cursor" "Google Chrome" Safari Arc Firefox Slack Spotify "LM Studio"; do
@@ -1140,8 +1165,11 @@ audit_caches() {
   [[ -d "$XC/Archives" ]] && { kb=$(du_kb "$XC/Archives"); (( kb > 0 )) && add_candidate xcode "$(m xcode.archives.label)" "$XC/Archives" "$kb" "$(newest_age_days "$XC/Archives")" \
       manual "$(m xcode.archives.reason)" "none"; }
   CS="$HOME/Library/Developer/CoreSimulator"
-  [[ -d "$CS/Caches" ]] && { kb=$(du_kb "$CS/Caches"); (( kb > 0 )) && add_candidate simulator "CoreSimulator/Caches" "$CS/Caches" "$kb" "$(newest_age_days "$CS/Caches")" \
-      "$(verdict_for "$CS/Caches" "$CACHE_DAYS" | cut -d'|' -f1)" "$(verdict_for "$CS/Caches" "$CACHE_DAYS" | cut -d'|' -f2)" "$(new_action rm-contents "$CS/Caches")"; }
+  if [[ -d "$CS/Caches" ]]; then
+    kb=$(du_kb "$CS/Caches")
+    IFS='|' read -r v reason <<< "$(verdict_for "$CS/Caches" "$CACHE_DAYS")"
+    (( kb > 0 )) && add_candidate simulator "CoreSimulator/Caches" "$CS/Caches" "$kb" "$(newest_age_days "$CS/Caches")" "$v" "$reason" "$(new_action rm-contents "$CS/Caches")"
+  fi
   if [[ -d "$CS/Devices" ]] && have xcrun; then
     kb=$(du_kb "$CS/Devices")
     (( kb > 0 )) && add_candidate simulator "$(m sim.unavailable.label)" "$CS/Devices" "$kb" "-" \
@@ -1171,8 +1199,11 @@ audit_caches() {
       caution "$(m cargo.reason)" "$(new_action rm-contents "$HOME/.cargo/registry/cache")"; }
   [[ -d "$HOME/go/pkg/mod" ]] && { kb=$(du_kb "$HOME/go/pkg/mod"); (( kb > 10240 )) && add_candidate go "$(m go.label)" "$HOME/go/pkg/mod" "$kb" "$(newest_age_days "$HOME/go/pkg/mod")" \
       caution "$(m go.reason)" "$(new_action cmd "go clean -modcache")"; }
-  [[ -d "$HOME/.gradle/caches" ]] && { kb=$(du_kb "$HOME/.gradle/caches"); (( kb > 10240 )) && add_candidate gradle "$(m gradle.label)" "$HOME/.gradle/caches" "$kb" "$(newest_age_days "$HOME/.gradle/caches")" \
-      "$(verdict_for "$HOME/.gradle/caches" "$CACHE_DAYS" | cut -d'|' -f1)" "$(verdict_for "$HOME/.gradle/caches" "$CACHE_DAYS" | cut -d'|' -f2)" "$(new_action rm-contents "$HOME/.gradle/caches")"; }
+  if [[ -d "$HOME/.gradle/caches" ]]; then
+    kb=$(du_kb "$HOME/.gradle/caches")
+    IFS='|' read -r v reason <<< "$(verdict_for "$HOME/.gradle/caches" "$CACHE_DAYS")"
+    (( kb > 10240 )) && add_candidate gradle "$(m gradle.label)" "$HOME/.gradle/caches" "$kb" "$(newest_age_days "$HOME/.gradle/caches")" "$v" "$reason" "$(new_action rm-contents "$HOME/.gradle/caches")"
+  fi
 
   # Docker
   if have docker && docker info >/dev/null 2>&1; then
@@ -1205,9 +1236,7 @@ scan_model_root() {  # scan_model_root CATEGORIE RACINE  (le libellé de catégo
   for d in "$root"/*(N/); do
     kb=$(du_kb "$d"); (( kb < 51200 )) && continue   # < 50 MiB
     age=$(newest_age_days "$d")
-    c=$(conflict_reason "$d")
-    if [[ -n "$c" ]]; then v=caution; reason="$c"
-    elif (( age >= MODEL_DAYS )); then v=caution; reason="$(m model.old.reason "$age" "$MODEL_DAYS")"
+    if (( age >= MODEL_DAYS )); then v=caution; reason="$(m model.old.reason "$age" "$MODEL_DAYS")"
     else v=manual; reason="$(m model.recent.reason "$age")"; fi
     add_candidate "$cat" "${d:t}" "$d" "$kb" "$age" "$v" "$reason" "$(new_action rm-path "$d")"
   done
@@ -1275,8 +1304,6 @@ audit_big() {
     -not -path "$HOME/Library/*" -not -path "$HOME/.*" 2>/dev/null | while read -r d; do
     proj="${d:h}"
     [[ "${d:t}" == "target" && ! -f "$proj/Cargo.toml" ]] && continue
-    skip=0; for ap in "${ACTIVE_PROJECTS[@]}"; do [[ "$proj" == "$ap" || "$proj" == "$ap"/* ]] && skip=1; done
-    (( skip )) && continue
     kb=$(du_kb "$d"); (( kb < 51200 )) && continue
     age=$(newest_age_days "$proj")
     (( age < ACTIVE_DAYS )) && continue
